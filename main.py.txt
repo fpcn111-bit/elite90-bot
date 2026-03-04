@@ -1,0 +1,64 @@
+import os
+from flask import Flask, request
+
+import requests
+
+app = Flask(__name__)
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip()  # ex: https://seu-servico.onrender.com
+
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("Faltou a variável TELEGRAM_TOKEN no ambiente (Render).")
+
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+def send_message(chat_id: int, text: str):
+    payload = {"chat_id": chat_id, "text": text}
+    r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=20)
+    r.raise_for_status()
+
+def set_webhook():
+    if not PUBLIC_URL:
+        # Sem PUBLIC_URL, não dá para setar webhook automaticamente.
+        # Você vai setar depois pelo painel do Telegram (ou colocar a env e redeploy).
+        return
+    webhook_url = f"{PUBLIC_URL}/webhook"
+    r = requests.post(f"{TELEGRAM_API}/setWebhook", json={"url": webhook_url}, timeout=20)
+    r.raise_for_status()
+
+@app.get("/")
+def home():
+    return "Elite90 bot online ✅", 200
+
+@app.post("/webhook")
+def webhook():
+    update = request.get_json(silent=True) or {}
+
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    text = (message.get("text") or "").strip()
+
+    if not chat_id or not text:
+        return {"ok": True}, 200
+
+    # Comandos básicos
+    if text in ("/start", "start"):
+        send_message(chat_id, "🤖 Elite90 BetBot online ✅\nUse /teste para checar.")
+    elif text.startswith("/teste"):
+        send_message(chat_id, "✅ Teste OK! Bot está funcionando e recebendo mensagens.")
+    else:
+        send_message(
+            chat_id,
+            "Recebi sua mensagem ✅\nPor enquanto tenho /teste.\nEm breve: /jogoshoje /top10 /betbuilder"
+        )
+
+    return {"ok": True}, 200
+
+# Quando o Render iniciar, tenta setar o webhook (se PUBLIC_URL estiver definida)
+try:
+    set_webhook()
+except Exception:
+    # Se falhar, não derruba o app; depois setamos manualmente.
+    pass
