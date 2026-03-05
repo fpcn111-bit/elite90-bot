@@ -49,12 +49,12 @@ def webhook():
         send_message(chat_id, "🤖 Elite90 BetBot online ✅\nUse /teste para checar.")
     elif text.startswith("/teste"):
         send_message(chat_id, "✅ Teste OK! Bot está funcionando e recebendo mensagens.")
-    elif text.startswith("/jogoshoje"):
-        try:
-            jogos = jogos_hoje()
-            send_message(chat_id, format_jogos(jogos, limit=15))
-        except Exception:
-            send_message(chat_id, "Erro ao buscar jogos de hoje no Sofascore. Tenta de novo daqui a pouco.")
+   elif text.startswith("/jogoshoje"):
+    try:
+        jogos = jogos_hoje()
+        send_message(chat_id, format_jogos(jogos, limit=15))
+    except Exception as e:
+        send_message(chat_id, f"Erro Sofascore: {type(e).__name__} - {e}")
 
     elif text.startswith("/stats"):
         parts = text.split()
@@ -86,5 +86,6 @@ try:
 except Exception:
     # Se falhar, não derruba o app; depois setamos manualmente.
     pass
+
 
 
