@@ -2,6 +2,7 @@ import os
 from flask import Flask, request
 
 import requests
+import datetime
 
 app = Flask(__name__)
 
@@ -85,4 +86,5 @@ try:
 except Exception:
     # Se falhar, não derruba o app; depois setamos manualmente.
     pass
+
 
