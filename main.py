@@ -31,18 +31,14 @@ HEADERS = {
 
 SESSION = requests.Session()
 
+PROXY_BASE = os.environ.get("SOFA_PROXY_BASE", "").strip()
+
 def sc_get(path: str):
-    url = f"{SOFASCORE_BASE}{path}"
+    if not PROXY_BASE:
+        raise RuntimeError("Faltou SOFA_PROXY_BASE no Render.")
 
-    # 1ª tentativa
-    r = SESSION.get(url, headers=HEADERS, timeout=25)
-
-    # Se vier 403, tenta uma 2ª vez com outro user-agent (fallback)
-    if r.status_code == 403:
-        headers2 = dict(HEADERS)
-        headers2["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
-        r = SESSION.get(url, headers=headers2, timeout=25)
-
+    url = f"{PROXY_BASE}/proxy"
+    r = requests.get(url, params={"path": path}, timeout=25)
     r.raise_for_status()
     return r.json()
 
@@ -232,3 +228,4 @@ try:
     set_webhook()
 except Exception:
     pass
+
