@@ -16,6 +16,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 # ====== SOFASCORE ======
 SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -32,7 +33,16 @@ SESSION = requests.Session()
 
 def sc_get(path: str):
     url = f"{SOFASCORE_BASE}{path}"
+
+    # 1ª tentativa
     r = SESSION.get(url, headers=HEADERS, timeout=25)
+
+    # Se vier 403, tenta uma 2ª vez com outro user-agent (fallback)
+    if r.status_code == 403:
+        headers2 = dict(HEADERS)
+        headers2["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
+        r = SESSION.get(url, headers=headers2, timeout=25)
+
     r.raise_for_status()
     return r.json()
 
@@ -125,7 +135,6 @@ def resumo_stats(stats_json):
 
     if not out:
         return "Estatísticas vieram em formato diferente; ainda não consegui ler."
-
     return "\n".join(out)
 
 def resumo_lineups(lineups_json):
@@ -215,16 +224,11 @@ def webhook():
                 send_message(chat_id, f"Erro ao puxar stats: {type(e).__name__} - {e}")
 
     else:
-        send_message(
-            chat_id,
-            "Recebi sua mensagem ✅\n\nComandos:\n/teste\n/jogoshoje\n/stats ID_DO_JOGO"
-        )
+        send_message(chat_id, "Comandos:\n/teste\n/jogoshoje\n/stats ID_DO_JOGO")
 
     return {"ok": True}, 200
 
-# Quando o Render iniciar, tenta setar webhook (se PUBLIC_URL estiver definida)
 try:
     set_webhook()
 except Exception:
     pass
-
