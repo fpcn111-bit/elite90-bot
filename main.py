@@ -17,14 +17,22 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 # ====== SOFASCORE ======
 SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; Elite90BetBot/1.0; +https://t.me/elite90betbot)",
-    "Accept": "application/json,text/plain,*/*",
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Origin": "https://www.sofascore.com",
+    "Referer": "https://www.sofascore.com/",
+    "Connection": "keep-alive",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
+
+SESSION = requests.Session()
 
 def sc_get(path: str):
     url = f"{SOFASCORE_BASE}{path}"
-    r = requests.get(url, headers=HEADERS, timeout=25)
+    r = SESSION.get(url, headers=HEADERS, timeout=25)
     r.raise_for_status()
     return r.json()
 
@@ -219,3 +227,4 @@ try:
     set_webhook()
 except Exception:
     pass
+
