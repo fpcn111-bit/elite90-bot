@@ -7,46 +7,52 @@ app = Flask(__name__)
 
 # ====== CONFIG TELEGRAM ======
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip()  # ex: https://seu-app.onrender.com
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip()
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Faltou a variável TELEGRAM_TOKEN no ambiente (Render).")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# ====== SOFASCORE ======
-SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Origin": "https://www.sofascore.com",
-    "Referer": "https://www.sofascore.com/",
-    "Connection": "keep-alive",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-}
-
-SESSION = requests.Session()
-
+# ====== SOFASCORE / PROXY ======
 PROXY_BASE = os.environ.get("SOFA_PROXY_BASE", "").strip()
+
+class SofaProxyError(Exception):
+    pass
 
 def sc_get(path: str):
     if not PROXY_BASE:
         raise RuntimeError("Faltou SOFA_PROXY_BASE no Render.")
 
     url = f"{PROXY_BASE}/proxy"
-    r = requests.get(url, params={"path": path}, timeout=25)
-    r.raise_for_status()
-    return r.json()
+
+    try:
+        r = requests.get(url, params={"path": path}, timeout=25)
+    except requests.RequestException as e:
+        raise SofaProxyError(f"Falha de conexão com o proxy: {e}")
+
+    if r.status_code == 403:
+        raise SofaProxyError(
+            "SofaScore bloqueou a requisição (403 Forbidden). "
+            "O bot está online, mas a fonte de dados recusou o acesso."
+        )
+
+    try:
+        r.raise_for_status()
+    except requests.RequestException as e:
+        raise SofaProxyError(f"Erro HTTP no proxy: {e}")
+
+    try:
+        return r.json()
+    except Exception:
+        raise SofaProxyError("O proxy respondeu, mas não retornou JSON válido.")
 
 def jogos_hoje():
     hoje = datetime.date.today().isoformat()
     data = sc_get(f"/sport/football/scheduled-events/{hoje}")
     events = data.get("events", [])
     jogos = []
+
     for e in events:
         t = (e.get("tournament") or {})
         c = (t.get("category") or {})
@@ -57,11 +63,14 @@ def jogos_hoje():
         country = c.get("name", "")
         start_ts = e.get("startTimestamp") or 0
         jogos.append((event_id, home, away, country, league, start_ts))
+
     jogos.sort(key=lambda x: x[5])
     return jogos
 
 def format_jogos(jogos, limit=15):
-    linhas = ["⚽ Jogos de hoje (Sofascore):"]
+    if not jogos:
+        return "⚽ Nenhum jogo encontrado para hoje."
+    linhas = ["⚽ Jogos de hoje:"]
     for (eid, home, away, country, league, _ts) in jogos[:limit]:
         linhas.append(f"- {home} x {away} | {country} - {league} | id: {eid}")
     linhas.append("\nUse: /stats ID_DO_JOGO")
@@ -77,16 +86,17 @@ def stats_evento(event_id: int):
     away_name = away.get("name", "Fora")
 
     stats = None
+    lineups = None
+
     try:
         stats = sc_get(f"/event/{event_id}/statistics")
     except Exception:
-        stats = None
+        pass
 
-    lineups = None
     try:
         lineups = sc_get(f"/event/{event_id}/lineups")
     except Exception:
-        lineups = None
+        pass
 
     return {
         "match": f"{home_name} x {away_name}",
@@ -96,7 +106,7 @@ def stats_evento(event_id: int):
 
 def resumo_stats(stats_json):
     if not stats_json:
-        return "Sem estatísticas disponíveis (ainda)."
+        return "Sem estatísticas disponíveis."
 
     out = []
     statistics = stats_json.get("statistics", [])
@@ -117,7 +127,7 @@ def resumo_stats(stats_json):
         "Yellow cards": "Cartões amarelos",
         "Red cards": "Cartões vermelhos",
         "Offsides": "Impedimentos",
-        "Throw-ins": "Arremessos laterais",
+        "Throw-ins": "Laterais",
     }
 
     for g in groups:
@@ -130,7 +140,7 @@ def resumo_stats(stats_json):
                 out.append(f"{wanted[name]}: {home} x {away}")
 
     if not out:
-        return "Estatísticas vieram em formato diferente; ainda não consegui ler."
+        return "Estatísticas vieram em formato diferente."
     return "\n".join(out)
 
 def resumo_lineups(lineups_json):
@@ -152,7 +162,7 @@ def resumo_lineups(lineups_json):
         return ", ".join(names) if names else "(não veio lista)"
 
     return (
-        "👥 Escalações (se disponível):\n"
+        "👥 Escalações:\n"
         f"Casa: {top_names(hp)}\n"
         f"Fora: {top_names(ap)}"
     )
@@ -173,7 +183,8 @@ def set_webhook():
 # ====== ROUTES ======
 @app.get("/")
 def home():
-    return "Elite90 bot online ✅", 200
+    proxy_info = PROXY_BASE if PROXY_BASE else "NÃO CONFIGURADO"
+    return f"Elite90 bot online ✅ | Proxy: {proxy_info}", 200
 
 @app.post("/webhook")
 def webhook():
@@ -189,23 +200,29 @@ def webhook():
     if text in ("/start", "start"):
         send_message(
             chat_id,
-            "🤖 Elite90 BetBot online ✅\n\nComandos:\n/teste\n/jogoshoje\n/stats ID_DO_JOGO"
+            "🤖 Elite90 BetBot online ✅\n\nComandos:\n/teste\n/jogoshoje\n/stats ID_DO_JOGO\n/status"
         )
 
     elif text.startswith("/teste"):
-        send_message(chat_id, "✅ Teste OK! Bot está funcionando e recebendo mensagens.")
+        send_message(chat_id, "✅ Teste OK! Bot online e recebendo mensagens.")
+
+    elif text.startswith("/status"):
+        send_message(
+            chat_id,
+            f"✅ Bot online\nProxy configurado: {'SIM' if PROXY_BASE else 'NÃO'}\nBase: {PROXY_BASE or 'vazia'}"
+        )
 
     elif text.startswith("/jogoshoje"):
         try:
             jogos = jogos_hoje()
             send_message(chat_id, format_jogos(jogos, limit=15))
         except Exception as e:
-            send_message(chat_id, f"Erro Sofascore: {type(e).__name__} - {e}")
+            send_message(chat_id, f"⚠️ Fonte de dados indisponível no momento.\nDetalhe: {e}")
 
     elif text.startswith("/stats"):
         parts = text.split()
         if len(parts) < 2 or not parts[1].isdigit():
-            send_message(chat_id, "Use assim: /stats 123456 (id do jogo)")
+            send_message(chat_id, "Use assim: /stats 123456")
         else:
             eid = int(parts[1])
             try:
@@ -217,10 +234,10 @@ def webhook():
                 )
                 send_message(chat_id, msg)
             except Exception as e:
-                send_message(chat_id, f"Erro ao puxar stats: {type(e).__name__} - {e}")
+                send_message(chat_id, f"⚠️ Não consegui buscar as stats.\nDetalhe: {e}")
 
     else:
-        send_message(chat_id, "Comandos:\n/teste\n/jogoshoje\n/stats ID_DO_JOGO")
+        send_message(chat_id, "Comandos:\n/teste\n/jogoshoje\n/stats ID_DO_JOGO\n/status")
 
     return {"ok": True}, 200
 
@@ -228,4 +245,3 @@ try:
     set_webhook()
 except Exception:
     pass
-
