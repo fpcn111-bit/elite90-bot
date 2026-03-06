@@ -47,76 +47,109 @@ def set_webhook():
         timeout=25
     )
 
+def agora_sp():
+    return datetime.datetime.now(ZoneInfo(TIMEZONE))
+
 def hoje_sp():
-    return datetime.datetime.now(ZoneInfo(TIMEZONE)).date()
+    return agora_sp().date()
+
+def normalizar_jogo(item, data_ref):
+    fixture = item.get("fixture", {})
+    teams = item.get("teams", {})
+    league = item.get("league", {})
+
+    ts = fixture.get("timestamp") or 0
+    status = ((fixture.get("status") or {}).get("short") or "").upper()
+
+    try:
+        dt_local = datetime.datetime.fromtimestamp(ts, ZoneInfo(TIMEZONE))
+        hora_local = dt_local.strftime("%H:%M")
+        data_local = dt_local.date().isoformat()
+    except Exception:
+        hora_local = "--:--"
+        data_local = data_ref
+
+    return {
+        "id": fixture.get("id"),
+        "home": (teams.get("home") or {}).get("name", "Casa"),
+        "away": (teams.get("away") or {}).get("name", "Fora"),
+        "league": league.get("name", ""),
+        "country": league.get("country", ""),
+        "status": status,
+        "timestamp": ts,
+        "hora_local": hora_local,
+        "data_local": data_local,
+    }
 
 def jogos_por_data(data_str):
-    data = af_get("/fixtures", {"date": data_str, "timezone": TIMEZONE})
+    data = af_get("/fixtures", {
+        "date": data_str,
+        "timezone": TIMEZONE
+    })
     jogos = []
 
     for item in data.get("response", []):
-        fixture = item.get("fixture", {})
-        teams = item.get("teams", {})
-        league = item.get("league", {})
-
-        jogos.append({
-            "id": fixture.get("id"),
-            "home": (teams.get("home") or {}).get("name", "Casa"),
-            "away": (teams.get("away") or {}).get("name", "Fora"),
-            "league": league.get("name", ""),
-            "country": league.get("country", ""),
-            "status": ((fixture.get("status") or {}).get("short") or "")
-        })
+        jogos.append(normalizar_jogo(item, data_str))
 
     return jogos
 
 def jogos_hoje():
-    base = hoje_sp()
-    datas_teste = [
-        base.isoformat(),
-        (base + datetime.timedelta(days=1)).isoformat(),
-        (base - datetime.timedelta(days=1)).isoformat(),
-    ]
+    hoje = hoje_sp()
+    amanha = hoje + datetime.timedelta(days=1)
 
-    for data_str in datas_teste:
-        jogos = jogos_por_data(data_str)
-        if jogos:
-            return data_str, jogos
+    jogos_hoje_lista = jogos_por_data(hoje.isoformat())
+    jogos_amanha_lista = jogos_por_data(amanha.isoformat())
 
-    return datas_teste[0], []
+    todos = jogos_hoje_lista + jogos_amanha_lista
 
-def format_jogos(data_usada, jogos, limit=15):
+    # remove duplicados por id
+    unicos = {}
+    for j in todos:
+        jid = j.get("id")
+        if jid is not None:
+            unicos[jid] = j
+
+    jogos = list(unicos.values())
+    jogos.sort(key=lambda x: x["timestamp"])
+
+    return hoje.isoformat(), amanha.isoformat(), jogos
+
+def format_jogos(data_hoje, data_amanha, jogos, limit=30):
     if not jogos:
         return (
             "⚽ Jogos do dia:\n\n"
-            f"Nenhum jogo encontrado.\n"
-            f"Data usada: {data_usada}\n"
-            f"Timezone: {TIMEZONE}\n\n"
-            "Use /debugjogos para ver o que a API está retornando."
+            "Nenhum jogo encontrado.\n"
+            f"Hoje: {data_hoje}\n"
+            f"Amanhã: {data_amanha}\n"
+            f"Timezone: {TIMEZONE}"
         )
 
-    msg = f"⚽ Jogos do dia ({data_usada}):\n\n"
+    linhas = [f"⚽ Jogos encontrados ({TIMEZONE}):\n"]
 
     for j in jogos[:limit]:
-        msg += f"{j['home']} x {j['away']}\n"
-        msg += f"{j['country']} - {j['league']}\n"
-        msg += f"id: {j['id']} | status: {j['status']}\n\n"
+        marcador = "Hoje"
+        if j["data_local"] == data_amanha:
+            marcador = "Amanhã"
 
-    msg += "Use: /stats ID_DO_JOGO\n"
-    msg += "ou: /analise ID_DO_JOGO"
-    return msg
+        linhas.append(f"{j['home']} x {j['away']}")
+        linhas.append(f"{j['country']} - {j['league']}")
+        linhas.append(f"{marcador}, {j['hora_local']} | id: {j['id']} | status: {j['status']}")
+        linhas.append("")
+
+    linhas.append("Use: /stats ID_DO_JOGO")
+    linhas.append("ou: /analise ID_DO_JOGO")
+
+    return "\n".join(linhas)
 
 def debug_jogos():
-    base = hoje_sp()
-    datas_teste = [
-        base.isoformat(),
-        (base + datetime.timedelta(days=1)).isoformat(),
-        (base - datetime.timedelta(days=1)).isoformat(),
-    ]
+    hoje = hoje_sp()
+    amanha = hoje + datetime.timedelta(days=1)
+    ontem = hoje - datetime.timedelta(days=1)
 
+    datas = [ontem.isoformat(), hoje.isoformat(), amanha.isoformat()]
     linhas = [f"🛠 Debug jogos | timezone={TIMEZONE}\n"]
 
-    for d in datas_teste:
+    for d in datas:
         try:
             jogos = jogos_por_data(d)
             linhas.append(f"{d}: {len(jogos)} jogos")
@@ -195,8 +228,8 @@ def webhook():
 
     elif text == "/jogoshoje":
         try:
-            data_usada, jogos = jogos_hoje()
-            send(chat_id, format_jogos(data_usada, jogos, limit=15))
+            data_hoje, data_amanha, jogos = jogos_hoje()
+            send(chat_id, format_jogos(data_hoje, data_amanha, jogos, limit=30))
         except Exception as e:
             send(chat_id, f"Erro ao buscar jogos: {type(e).__name__} - {e}")
 
