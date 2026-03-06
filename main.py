@@ -1,6 +1,7 @@
 import os
 import datetime
 import requests
+from zoneinfo import ZoneInfo
 from flask import Flask, request
 
 app = Flask(__name__)
@@ -53,8 +54,38 @@ def set_webhook():
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
+def pct(prob):
+    return int(round(prob * 100))
+
 # =====================================
-# JOGOS DO DIA
+# DATAS / FUSO
+# =====================================
+def datas_candidatas():
+    datas = []
+    try:
+        br_now = datetime.datetime.now(ZoneInfo("America/Sao_Paulo"))
+        datas.append(br_now.date())
+        datas.append((br_now + datetime.timedelta(days=1)).date())
+        datas.append((br_now - datetime.timedelta(days=1)).date())
+    except Exception:
+        pass
+
+    utc_now = datetime.datetime.utcnow().date()
+    datas.append(utc_now)
+    datas.append(utc_now + datetime.timedelta(days=1))
+    datas.append(utc_now - datetime.timedelta(days=1))
+
+    unicas = []
+    vistos = set()
+    for d in datas:
+        s = d.isoformat()
+        if s not in vistos:
+            vistos.add(s)
+            unicas.append(s)
+    return unicas
+
+# =====================================
+# JOGOS
 # =====================================
 def normalizar_jogo(item):
     fixture = item.get("fixture", {})
@@ -76,21 +107,30 @@ def normalizar_jogo(item):
         "status": status
     }
 
-def jogos_hoje_raw():
-    hoje = datetime.date.today().isoformat()
-    data = af_get("/fixtures", {"date": hoje})
+def fixtures_por_data(data_str):
+    data = af_get("/fixtures", {"date": data_str})
     return data.get("response", [])
 
-def jogos_hoje_formatados():
-    jogos = [normalizar_jogo(item) for item in jogos_hoje_raw()]
-    jogos.sort(key=lambda x: x["timestamp"])
-    return jogos
+def jogos_disponiveis():
+    """
+    Procura jogos usando várias datas candidatas e pega a primeira que vier com resultados.
+    """
+    for data_str in datas_candidatas():
+        try:
+            resp = fixtures_por_data(data_str)
+            jogos = [normalizar_jogo(x) for x in resp]
+            if jogos:
+                jogos.sort(key=lambda x: x["timestamp"])
+                return data_str, jogos
+        except Exception:
+            continue
+    return None, []
 
-def format_jogos(jogos, limit=20):
+def format_jogos(data_usada, jogos, limit=20):
     if not jogos:
-        return "⚽ Jogos de hoje:\n\nNenhum jogo encontrado."
+        return "⚽ Jogos do dia:\n\nNenhum jogo encontrado."
 
-    linhas = ["⚽ Jogos de hoje:\n"]
+    linhas = [f"⚽ Jogos do dia ({data_usada}):\n"]
     for j in jogos[:limit]:
         linhas.append(f"{j['home']} x {j['away']}")
         linhas.append(f"{j['country']} - {j['league']}")
@@ -227,6 +267,7 @@ def resumir_stats_fixture(stats_response, home_name, away_name):
     for item in stats_response:
         team_name = (item.get("team") or {}).get("name", "")
         bucket = None
+
         if team_name == home_name:
             bucket = resultado["home"]
         elif team_name == away_name:
@@ -243,8 +284,14 @@ def resumir_stats_fixture(stats_response, home_name, away_name):
     return resultado
 
 # =====================================
-# TOP10 - GOLS E ESCANTEIOS
+# MODELO TOP10 - GOLS E ESCANTEIOS
 # =====================================
+def parse_percent(x):
+    try:
+        return float(str(x).replace("%", "").strip()) / 100.0
+    except Exception:
+        return None
+
 def calcular_modelo_top10(jogo):
     home_last = ultimos_jogos_time(jogo["home_id"], 10)
     away_last = ultimos_jogos_time(jogo["away_id"], 10)
@@ -256,13 +303,6 @@ def calcular_modelo_top10(jogo):
     h2h = extrair_stats_h2h(h2h_last)
 
     pred_percent = pred.get("percent", {}) if pred else {}
-
-    def parse_percent(x):
-        try:
-            return float(str(x).replace("%", "").strip()) / 100.0
-        except Exception:
-            return None
-
     p_home_api = parse_percent(pred_percent.get("home"))
     p_away_api = parse_percent(pred_percent.get("away"))
 
@@ -315,7 +355,7 @@ def calcular_modelo_top10(jogo):
     ]
 
 def gerar_top10_apostas():
-    jogos = jogos_hoje_formatados()
+    _, jogos = jogos_disponiveis()
     apostas = []
 
     for jogo in jogos:
@@ -343,7 +383,7 @@ def format_top10_apostas(apostas):
     for i, item in enumerate(apostas, start=1):
         linhas.append(f"{i}. {item['jogo']}")
         linhas.append(item["mercado"])
-        linhas.append(f"Probabilidade: {int(item['prob'] * 100)}%\n")
+        linhas.append(f"Probabilidade: {pct(item['prob'])}%\n")
     return "\n".join(linhas)
 
 # =====================================
@@ -361,13 +401,6 @@ def calcular_analise_avulsa(jogo):
     h2h = extrair_stats_h2h(h2h_last)
 
     pred_percent = pred.get("percent", {}) if pred else {}
-
-    def parse_percent(x):
-        try:
-            return float(str(x).replace("%", "").strip()) / 100.0
-        except Exception:
-            return None
-
     p_home_api = parse_percent(pred_percent.get("home"))
     p_draw_api = parse_percent(pred_percent.get("draw"))
     p_away_api = parse_percent(pred_percent.get("away"))
@@ -472,7 +505,7 @@ def format_analise_avulsa(jogo, picks):
 
     for i, (mercado, prob) in enumerate(picks, start=1):
         linhas.append(f"{i}. {mercado}")
-        linhas.append(f"Probabilidade: {int(prob * 100)}%\n")
+        linhas.append(f"Probabilidade: {pct(prob)}%\n")
 
     return "\n".join(linhas)
 
@@ -522,8 +555,8 @@ def webhook():
 
     elif text == "/jogoshoje":
         try:
-            jogos = jogos_hoje_formatados()
-            send(chat_id, format_jogos(jogos, limit=20))
+            data_usada, jogos = jogos_disponiveis()
+            send(chat_id, format_jogos(data_usada, jogos, limit=20))
         except Exception as e:
             send(chat_id, f"Erro ao buscar jogos: {type(e).__name__} - {e}")
 
