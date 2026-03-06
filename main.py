@@ -5,243 +5,121 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-# ====== CONFIG TELEGRAM ======
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip()
-
-if not TELEGRAM_TOKEN:
-    raise RuntimeError("Faltou a variável TELEGRAM_TOKEN no ambiente (Render).")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+API_KEY = os.environ.get("API_FOOTBALL_KEY")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# ====== SOFASCORE / PROXY ======
-PROXY_BASE = os.environ.get("SOFA_PROXY_BASE", "").strip()
+BASE_URL = "https://v3.football.api-sports.io"
 
-class SofaProxyError(Exception):
-    pass
+HEADERS = {
+    "x-apisports-key": API_KEY
+}
 
-def sc_get(path: str):
-    if not PROXY_BASE:
-        raise RuntimeError("Faltou SOFA_PROXY_BASE no Render.")
-
-    url = f"{PROXY_BASE}/proxy"
-
-    try:
-        r = requests.get(url, params={"path": path}, timeout=25)
-    except requests.RequestException as e:
-        raise SofaProxyError(f"Falha de conexão com o proxy: {e}")
-
-    if r.status_code == 403:
-        raise SofaProxyError(
-            "SofaScore bloqueou a requisição (403 Forbidden). "
-            "O bot está online, mas a fonte de dados recusou o acesso."
-        )
-
-    try:
-        r.raise_for_status()
-    except requests.RequestException as e:
-        raise SofaProxyError(f"Erro HTTP no proxy: {e}")
-
-    try:
-        return r.json()
-    except Exception:
-        raise SofaProxyError("O proxy respondeu, mas não retornou JSON válido.")
+def af_get(endpoint, params=None):
+    url = f"{BASE_URL}{endpoint}"
+    r = requests.get(url, headers=HEADERS, params=params)
+    r.raise_for_status()
+    return r.json()
 
 def jogos_hoje():
     hoje = datetime.date.today().isoformat()
-    data = sc_get(f"/sport/football/scheduled-events/{hoje}")
-    events = data.get("events", [])
+
+    data = af_get("/fixtures", {"date": hoje})
+
     jogos = []
 
-    for e in events:
-        t = (e.get("tournament") or {})
-        c = (t.get("category") or {})
-        home = (e.get("homeTeam") or {}).get("name", "Casa")
-        away = (e.get("awayTeam") or {}).get("name", "Fora")
-        event_id = e.get("id")
-        league = t.get("name", "")
-        country = c.get("name", "")
-        start_ts = e.get("startTimestamp") or 0
-        jogos.append((event_id, home, away, country, league, start_ts))
+    for item in data["response"]:
 
-    jogos.sort(key=lambda x: x[5])
+        fixture = item["fixture"]
+        teams = item["teams"]
+        league = item["league"]
+
+        jogos.append({
+            "id": fixture["id"],
+            "home": teams["home"]["name"],
+            "away": teams["away"]["name"],
+            "league": league["name"],
+            "country": league["country"]
+        })
+
     return jogos
 
-def format_jogos(jogos, limit=15):
-    if not jogos:
-        return "⚽ Nenhum jogo encontrado para hoje."
-    linhas = ["⚽ Jogos de hoje:"]
-    for (eid, home, away, country, league, _ts) in jogos[:limit]:
-        linhas.append(f"- {home} x {away} | {country} - {league} | id: {eid}")
-    linhas.append("\nUse: /stats ID_DO_JOGO")
-    return "\n".join(linhas)
-
-def stats_evento(event_id: int):
-    info = sc_get(f"/event/{event_id}")
-    e = info.get("event", {})
-    home = (e.get("homeTeam") or {})
-    away = (e.get("awayTeam") or {})
-
-    home_name = home.get("name", "Casa")
-    away_name = away.get("name", "Fora")
-
-    stats = None
-    lineups = None
-
-    try:
-        stats = sc_get(f"/event/{event_id}/statistics")
-    except Exception:
-        pass
-
-    try:
-        lineups = sc_get(f"/event/{event_id}/lineups")
-    except Exception:
-        pass
-
-    return {
-        "match": f"{home_name} x {away_name}",
-        "stats": stats,
-        "lineups": lineups,
-    }
-
-def resumo_stats(stats_json):
-    if not stats_json:
-        return "Sem estatísticas disponíveis."
-
-    out = []
-    statistics = stats_json.get("statistics", [])
-    groups = []
-
-    if statistics and isinstance(statistics[0], dict) and "groups" in statistics[0]:
-        groups = statistics[0].get("groups", [])
-    elif statistics and isinstance(statistics[0], dict) and "statisticsItems" in statistics[0]:
-        groups = [{"statisticsItems": statistics}]
-    elif isinstance(statistics, list):
-        groups = statistics
-
-    wanted = {
-        "Shots on target": "Chutes no gol",
-        "Total shots": "Finalizações",
-        "Corner kicks": "Escanteios",
-        "Fouls": "Faltas",
-        "Yellow cards": "Cartões amarelos",
-        "Red cards": "Cartões vermelhos",
-        "Offsides": "Impedimentos",
-        "Throw-ins": "Laterais",
-    }
-
-    for g in groups:
-        items = g.get("statisticsItems", []) or g.get("items", [])
-        for it in items:
-            name = it.get("name")
-            if name in wanted:
-                home = it.get("home")
-                away = it.get("away")
-                out.append(f"{wanted[name]}: {home} x {away}")
-
-    if not out:
-        return "Estatísticas vieram em formato diferente."
-    return "\n".join(out)
-
-def resumo_lineups(lineups_json):
-    if not lineups_json:
-        return "👥 Escalações: ainda não disponíveis."
-
-    home = (lineups_json.get("home") or {})
-    away = (lineups_json.get("away") or {})
-    hp = home.get("players", [])
-    ap = away.get("players", [])
-
-    def top_names(players, n=11):
-        names = []
-        for p in players[:n]:
-            player = p.get("player") or {}
-            nm = player.get("name")
-            if nm:
-                names.append(nm)
-        return ", ".join(names) if names else "(não veio lista)"
-
-    return (
-        "👥 Escalações:\n"
-        f"Casa: {top_names(hp)}\n"
-        f"Fora: {top_names(ap)}"
+def send(chat_id, text):
+    requests.post(
+        f"{TELEGRAM_API}/sendMessage",
+        json={"chat_id": chat_id, "text": text}
     )
 
-# ====== TELEGRAM HELPERS ======
-def send_message(chat_id: int, text: str):
-    payload = {"chat_id": chat_id, "text": text}
-    r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=25)
-    r.raise_for_status()
-
-def set_webhook():
-    if not PUBLIC_URL:
-        return
-    webhook_url = f"{PUBLIC_URL}/webhook"
-    r = requests.post(f"{TELEGRAM_API}/setWebhook", json={"url": webhook_url}, timeout=25)
-    r.raise_for_status()
-
-# ====== ROUTES ======
-@app.get("/")
+@app.route("/")
 def home():
-    proxy_info = PROXY_BASE if PROXY_BASE else "NÃO CONFIGURADO"
-    return f"Elite90 bot online ✅ | Proxy: {proxy_info}", 200
+    return "Elite90 API-Football online"
 
-@app.post("/webhook")
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    update = request.get_json(silent=True) or {}
-    message = update.get("message") or {}
-    chat = message.get("chat") or {}
-    chat_id = chat.get("id")
-    text = (message.get("text") or "").strip()
 
-    if not chat_id or not text:
-        return {"ok": True}, 200
+    data = request.json
 
-    if text in ("/start", "start"):
-        send_message(
-            chat_id,
-            "🤖 Elite90 BetBot online ✅\n\nComandos:\n/teste\n/jogoshoje\n/stats ID_DO_JOGO\n/status"
-        )
+    message = data.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    text = message.get("text", "")
 
-    elif text.startswith("/teste"):
-        send_message(chat_id, "✅ Teste OK! Bot online e recebendo mensagens.")
+    if text == "/teste":
 
-    elif text.startswith("/status"):
-        send_message(
-            chat_id,
-            f"✅ Bot online\nProxy configurado: {'SIM' if PROXY_BASE else 'NÃO'}\nBase: {PROXY_BASE or 'vazia'}"
-        )
+        send(chat_id, "✅ Bot funcionando com API-Football")
 
-    elif text.startswith("/jogoshoje"):
+    elif text == "/jogoshoje":
+
         try:
+
             jogos = jogos_hoje()
-            send_message(chat_id, format_jogos(jogos, limit=15))
+
+            msg = "⚽ Jogos de hoje:\n\n"
+
+            for j in jogos[:15]:
+
+                msg += f"{j['home']} x {j['away']}\n"
+                msg += f"{j['country']} - {j['league']}\n"
+                msg += f"id: {j['id']}\n\n"
+
+            send(chat_id, msg)
+
         except Exception as e:
-            send_message(chat_id, f"⚠️ Fonte de dados indisponível no momento.\nDetalhe: {e}")
+
+            send(chat_id, f"Erro API-Football: {e}")
 
     elif text.startswith("/stats"):
+
         parts = text.split()
-        if len(parts) < 2 or not parts[1].isdigit():
-            send_message(chat_id, "Use assim: /stats 123456")
+
+        if len(parts) < 2:
+
+            send(chat_id, "Use: /stats ID_DO_JOGO")
+
         else:
-            eid = int(parts[1])
-            try:
-                data = stats_evento(eid)
-                msg = (
-                    f"📌 {data['match']}\n\n"
-                    f"📊 Estatísticas:\n{resumo_stats(data['stats'])}\n\n"
-                    f"{resumo_lineups(data['lineups'])}"
-                )
-                send_message(chat_id, msg)
-            except Exception as e:
-                send_message(chat_id, f"⚠️ Não consegui buscar as stats.\nDetalhe: {e}")
+
+            fixture_id = parts[1]
+
+            stats = af_get("/fixtures/statistics", {"fixture": fixture_id})
+
+            msg = "📊 Estatísticas:\n\n"
+
+            for team in stats["response"]:
+
+                name = team["team"]["name"]
+
+                msg += f"{name}\n"
+
+                for s in team["statistics"]:
+
+                    msg += f"{s['type']}: {s['value']}\n"
+
+                msg += "\n"
+
+            send(chat_id, msg)
 
     else:
-        send_message(chat_id, "Comandos:\n/teste\n/jogoshoje\n/stats ID_DO_JOGO\n/status")
 
-    return {"ok": True}, 200
+        send(chat_id, "Comandos:\n/teste\n/jogoshoje\n/stats ID_DO_JOGO")
 
-try:
-    set_webhook()
-except Exception:
-    pass
+    return {"ok": True}
