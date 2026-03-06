@@ -22,9 +22,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 BASE_URL = "https://v3.football.api-sports.io"
 
 session = requests.Session()
-session.headers.update({
-    "x-apisports-key": API_KEY
-})
+session.headers.update({"x-apisports-key": API_KEY})
 
 # =====================================
 # HELPERS
@@ -56,43 +54,15 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 # =====================================
-# REGRAS DE FILTRO
-# =====================================
-def jogo_eh_bloqueado(jogo):
-    texto = f"{jogo['country']} {jogo['league']} {jogo['home']} {jogo['away']}".lower()
-
-    bloqueados = [
-        "u17", "u18", "u19", "u20", "u21", "u23",
-        "reserve", "reserves"
-    ]
-
-    for b in bloqueados:
-        if b in texto:
-            return True
-    return False
-
-def status_valido(status):
-    # aceita jogos que vão começar, ao vivo ou no intervalo
-    permitidos = {
-        "TBD", "NS", "1H", "HT", "2H", "ET", "BT", "P", "SUSP", "INT", "LIVE"
-    }
-    return status in permitidos or status == ""
-
-# =====================================
 # JOGOS DO DIA
 # =====================================
-def jogos_hoje_raw():
-    hoje = datetime.date.today().isoformat()
-    data = af_get("/fixtures", {"date": hoje})
-    return data.get("response", [])
-
 def normalizar_jogo(item):
     fixture = item.get("fixture", {})
     teams = item.get("teams", {})
     league = item.get("league", {})
     status = ((fixture.get("status") or {}).get("short") or "").upper()
 
-    jogo = {
+    return {
         "id": fixture.get("id"),
         "home_id": (teams.get("home") or {}).get("id"),
         "away_id": (teams.get("away") or {}).get("id"),
@@ -105,42 +75,31 @@ def normalizar_jogo(item):
         "timestamp": fixture.get("timestamp", 0),
         "status": status
     }
-    return jogo
 
-def jogos_hoje_formatados(limit=None):
-    jogos = []
+def jogos_hoje_raw():
+    hoje = datetime.date.today().isoformat()
+    data = af_get("/fixtures", {"date": hoje})
+    return data.get("response", [])
 
-    for item in jogos_hoje_raw():
-        jogo = normalizar_jogo(item)
-
-        if jogo_eh_bloqueado(jogo):
-            continue
-
-        if not status_valido(jogo["status"]):
-            continue
-
-        jogos.append(jogo)
-
+def jogos_hoje_formatados():
+    jogos = [normalizar_jogo(item) for item in jogos_hoje_raw()]
     jogos.sort(key=lambda x: x["timestamp"])
-
-    if limit:
-        return jogos[:limit]
     return jogos
 
 def format_jogos(jogos, limit=20):
     if not jogos:
-        return "⚽ Jogos de hoje:\n\nNenhum jogo encontrado no filtro atual."
+        return "⚽ Jogos de hoje:\n\nNenhum jogo encontrado."
 
     linhas = ["⚽ Jogos de hoje:\n"]
     for j in jogos[:limit]:
         linhas.append(f"{j['home']} x {j['away']}")
         linhas.append(f"{j['country']} - {j['league']}")
-        linhas.append(f"id: {j['id']}\n")
+        linhas.append(f"id: {j['id']} | status: {j['status']}\n")
     linhas.append("Use: /analise ID_DO_JOGO")
     return "\n".join(linhas)
 
 # =====================================
-# DADOS POR TIME / H2H / TABELA / STATS
+# DADOS AUXILIARES
 # =====================================
 def ultimos_jogos_time(team_id, last=10):
     data = af_get("/fixtures", {"team": team_id, "last": last})
@@ -152,13 +111,6 @@ def confrontos_diretos(home_id, away_id, last=10):
         "last": last
     })
     return data.get("response", [])
-
-def standings(league_id, season):
-    try:
-        data = af_get("/standings", {"league": league_id, "season": season})
-        return data.get("response", [])
-    except Exception:
-        return []
 
 def predictions(fixture_id):
     try:
@@ -180,7 +132,6 @@ def fixture_statistics(fixture_id):
 # =====================================
 def extrair_stats_time(fixtures, team_id):
     jogos_validos = 0
-    wins = draws = losses = 0
     gols_pro = gols_contra = 0
     over15 = over25 = btts = 0
 
@@ -208,13 +159,6 @@ def extrair_stats_time(fixtures, team_id):
         gols_pro += pro
         gols_contra += contra
 
-        if pro > contra:
-            wins += 1
-        elif pro == contra:
-            draws += 1
-        else:
-            losses += 1
-
         total_gols = pro + contra
         if total_gols >= 2:
             over15 += 1
@@ -227,10 +171,6 @@ def extrair_stats_time(fixtures, team_id):
         jogos_validos = 1
 
     return {
-        "jogos": jogos_validos,
-        "wins": wins,
-        "draws": draws,
-        "losses": losses,
         "gols_pro": round(gols_pro / jogos_validos, 2),
         "gols_contra": round(gols_contra / jogos_validos, 2),
         "over15": round(over15 / jogos_validos, 2),
@@ -241,7 +181,7 @@ def extrair_stats_time(fixtures, team_id):
 def extrair_stats_h2h(fixtures):
     jogos_validos = 0
     soma_gols = 0
-    over15 = over25 = btts = 0
+    over15 = over25 = 0
 
     for f in fixtures:
         goals = f.get("goals", {})
@@ -251,43 +191,24 @@ def extrair_stats_h2h(fixtures):
             continue
 
         jogos_validos += 1
-        soma_gols += (hg + ag)
+        soma_gols += hg + ag
 
         if hg + ag >= 2:
             over15 += 1
         if hg + ag >= 3:
             over25 += 1
-        if hg > 0 and ag > 0:
-            btts += 1
 
     if jogos_validos == 0:
         jogos_validos = 1
 
     return {
-        "jogos": jogos_validos,
         "media_gols": round(soma_gols / jogos_validos, 2),
         "over15": round(over15 / jogos_validos, 2),
         "over25": round(over25 / jogos_validos, 2),
-        "btts": round(btts / jogos_validos, 2),
     }
 
-def posicoes_liga(standings_data, home_id, away_id):
-    home_pos = away_pos = None
-    try:
-        tabela = standings_data[0]["league"]["standings"][0]
-        for row in tabela:
-            team_id = (row.get("team") or {}).get("id")
-            rank = row.get("rank")
-            if team_id == home_id:
-                home_pos = rank
-            if team_id == away_id:
-                away_pos = rank
-    except Exception:
-        pass
-    return home_pos, away_pos
-
 # =====================================
-# STATS DO FIXTURE
+# STATS AO VIVO / PREMATCH
 # =====================================
 def parse_stat_value(v):
     if v is None:
@@ -301,18 +222,11 @@ def parse_stat_value(v):
         return None
 
 def resumir_stats_fixture(stats_response, home_name, away_name):
-    resultado = {
-        "home": {},
-        "away": {}
-    }
-
-    if not stats_response:
-        return resultado
+    resultado = {"home": {}, "away": {}}
 
     for item in stats_response:
         team_name = (item.get("team") or {}).get("name", "")
         bucket = None
-
         if team_name == home_name:
             bucket = resultado["home"]
         elif team_name == away_name:
@@ -323,9 +237,8 @@ def resumir_stats_fixture(stats_response, home_name, away_name):
         for stat in item.get("statistics", []):
             tipo = stat.get("type", "")
             valor = parse_stat_value(stat.get("value"))
-            if valor is None:
-                continue
-            bucket[tipo] = valor
+            if valor is not None:
+                bucket[tipo] = valor
 
     return resultado
 
@@ -337,12 +250,10 @@ def calcular_modelo_top10(jogo):
     away_last = ultimos_jogos_time(jogo["away_id"], 10)
     h2h_last = confrontos_diretos(jogo["home_id"], jogo["away_id"], 10)
     pred = predictions(jogo["id"])
-    table = standings(jogo["league_id"], jogo["season"])
 
     hs = extrair_stats_time(home_last, jogo["home_id"])
     aws = extrair_stats_time(away_last, jogo["away_id"])
     h2h = extrair_stats_h2h(h2h_last)
-    home_pos, away_pos = posicoes_liga(table, jogo["home_id"], jogo["away_id"])
 
     pred_percent = pred.get("percent", {}) if pred else {}
 
@@ -361,48 +272,40 @@ def calcular_modelo_top10(jogo):
     ) / 2
 
     p_over15 = clamp(
-        (hs["over15"] * 0.30) +
-        (aws["over15"] * 0.30) +
-        (h2h["over15"] * 0.20) +
-        (0.20 if media_total >= 2.0 else 0.08 if media_total >= 1.6 else 0.0),
+        hs["over15"] * 0.33 +
+        aws["over15"] * 0.33 +
+        h2h["over15"] * 0.20 +
+        (0.12 if media_total >= 2.0 else 0.04),
         0.25, 0.92
     )
 
     p_over25 = clamp(
-        (hs["over25"] * 0.32) +
-        (aws["over25"] * 0.32) +
-        (h2h["over25"] * 0.18) +
-        (0.14 if media_total >= 2.6 else 0.05 if media_total >= 2.2 else 0.0),
+        hs["over25"] * 0.34 +
+        aws["over25"] * 0.34 +
+        h2h["over25"] * 0.18 +
+        (0.10 if media_total >= 2.4 else 0.03),
         0.15, 0.82
     )
 
     p_under35 = clamp(0.88 - p_over25 * 0.45, 0.35, 0.90)
 
     base_corners = (
-        hs["gols_pro"] * 1.2 +
+        hs["gols_pro"] * 1.1 +
         aws["gols_pro"] * 1.1 +
-        hs["over15"] * 2.0 +
-        aws["over15"] * 2.0
+        hs["over15"] * 1.8 +
+        aws["over15"] * 1.8
     )
-
-    p_corner_over75 = clamp(0.42 + base_corners * 0.045, 0.35, 0.88)
-    p_corner_over85 = clamp(0.32 + base_corners * 0.040, 0.22, 0.82)
-    p_corner_over95 = clamp(0.22 + base_corners * 0.036, 0.15, 0.74)
 
     bonus = 0.0
     if p_home_api is not None and p_away_api is not None:
-        diff = abs(p_home_api - p_away_api)
-        if diff < 0.18:
+        if abs(p_home_api - p_away_api) < 0.20:
             bonus += 0.02
 
-    if home_pos and away_pos and abs(home_pos - away_pos) <= 4:
-        bonus += 0.01
+    p_corner_over75 = clamp(0.42 + base_corners * 0.045 + bonus, 0.30, 0.88)
+    p_corner_over85 = clamp(0.32 + base_corners * 0.040 + bonus, 0.20, 0.82)
+    p_corner_over95 = clamp(0.22 + base_corners * 0.036 + bonus, 0.12, 0.74)
 
-    p_corner_over75 = clamp(p_corner_over75 + bonus, 0.35, 0.90)
-    p_corner_over85 = clamp(p_corner_over85 + bonus, 0.22, 0.84)
-    p_corner_over95 = clamp(p_corner_over95 + bonus, 0.15, 0.76)
-
-    mercados = [
+    return [
         ("Total de Gols: Mais de 1.5", p_over15),
         ("Total de Gols: Mais de 2.5", p_over25),
         ("Total de Gols: Menos de 3.5", p_under35),
@@ -411,54 +314,20 @@ def calcular_modelo_top10(jogo):
         ("Total de Escanteios: Mais de 9.5", p_corner_over95),
     ]
 
-    return {
-        "jogo": jogo,
-        "home_stats": hs,
-        "away_stats": aws,
-        "h2h_stats": h2h,
-        "mercados": mercados
-    }
-
-def classificar_sinais_top10(modelo):
-    hs = modelo["home_stats"]
-    aws = modelo["away_stats"]
-    h2h = modelo["h2h_stats"]
-
-    sinais = 0
-    if hs["over15"] >= 0.70 or aws["over15"] >= 0.70:
-        sinais += 1
-    if h2h["over15"] >= 0.65:
-        sinais += 1
-    if hs["gols_pro"] >= 1.3 or aws["gols_pro"] >= 1.3:
-        sinais += 1
-    if h2h["media_gols"] >= 2.2:
-        sinais += 1
-
-    if sinais >= 3:
-        return "🟩 Aposta Forte"
-    if sinais == 2:
-        return "🟨 Aposta Boa"
-    return "⬜ Moderada"
-
 def gerar_top10_apostas():
     jogos = jogos_hoje_formatados()
-
     apostas = []
 
     for jogo in jogos:
         try:
-            modelo = calcular_modelo_top10(jogo)
-            classificacao = classificar_sinais_top10(modelo)
-
-            for nome, prob in modelo["mercados"]:
-                if prob < 0.62:
+            mercados = calcular_modelo_top10(jogo)
+            for nome, prob in mercados:
+                if prob < 0.58:
                     continue
-
                 apostas.append({
                     "jogo": f"{jogo['home']} x {jogo['away']}",
                     "mercado": nome,
-                    "prob": prob,
-                    "classificacao": classificacao
+                    "prob": prob
                 })
         except Exception:
             continue
@@ -471,14 +340,10 @@ def format_top10_apostas(apostas):
         return "Não encontrei oportunidades fortes hoje."
 
     linhas = ["🔥 TOP 10 DO DIA — GOLS E ESCANTEIOS\n"]
-
     for i, item in enumerate(apostas, start=1):
         linhas.append(f"{i}. {item['jogo']}")
         linhas.append(item["mercado"])
-        linhas.append(f"Probabilidade: {int(item['prob'] * 100)}%")
-        linhas.append(item["classificacao"])
-        linhas.append("")
-
+        linhas.append(f"Probabilidade: {int(item['prob'] * 100)}%\n")
     return "\n".join(linhas)
 
 # =====================================
@@ -521,69 +386,56 @@ def calcular_analise_avulsa(jogo):
     ) / 2
 
     p_over15 = clamp(
-        (hs["over15"] * 0.30) +
-        (aws["over15"] * 0.30) +
-        (h2h["over15"] * 0.20) +
-        (0.20 if media_total >= 2.0 else 0.08 if media_total >= 1.6 else 0.0),
+        hs["over15"] * 0.33 +
+        aws["over15"] * 0.33 +
+        h2h["over15"] * 0.20 +
+        (0.12 if media_total >= 2.0 else 0.04),
         0.25, 0.92
     )
 
     p_over25 = clamp(
-        (hs["over25"] * 0.32) +
-        (aws["over25"] * 0.32) +
-        (h2h["over25"] * 0.18) +
-        (0.14 if media_total >= 2.6 else 0.05 if media_total >= 2.2 else 0.0),
+        hs["over25"] * 0.34 +
+        aws["over25"] * 0.34 +
+        h2h["over25"] * 0.18 +
+        (0.10 if media_total >= 2.4 else 0.03),
         0.15, 0.82
     )
 
     p_under35 = clamp(0.88 - p_over25 * 0.45, 0.35, 0.90)
 
-    resumo_fixture = resumir_stats_fixture(stats_fixture, jogo["home"], jogo["away"])
-    home_now = resumo_fixture["home"]
-    away_now = resumo_fixture["away"]
+    resumo = resumir_stats_fixture(stats_fixture, jogo["home"], jogo["away"])
+    home_now = resumo["home"]
+    away_now = resumo["away"]
 
-    home_shots = home_now.get("Shots on Goal", 0) + home_now.get("Total Shots", 0) * 0.45
-    away_shots = away_now.get("Shots on Goal", 0) + away_now.get("Total Shots", 0) * 0.45
-    total_shots_proxy = home_shots + away_shots
+    total_corners = home_now.get("Corner Kicks", 0) + away_now.get("Corner Kicks", 0)
+    total_shots = (
+        home_now.get("Shots on Goal", 0) + away_now.get("Shots on Goal", 0) +
+        (home_now.get("Total Shots", 0) + away_now.get("Total Shots", 0)) * 0.45
+    )
+    total_cards = home_now.get("Yellow Cards", 0) + away_now.get("Yellow Cards", 0)
+    total_fouls = home_now.get("Fouls", 0) + away_now.get("Fouls", 0)
 
-    home_fouls = home_now.get("Fouls", 0)
-    away_fouls = away_now.get("Fouls", 0)
-    total_fouls_proxy = home_fouls + away_fouls
-
-    home_yellow = home_now.get("Yellow Cards", 0)
-    away_yellow = away_now.get("Yellow Cards", 0)
-    total_cards_proxy = home_yellow + away_yellow
-
-    home_corners = home_now.get("Corner Kicks", 0)
-    away_corners = away_now.get("Corner Kicks", 0)
-    total_corners_proxy = home_corners + away_corners
-
-    if total_corners_proxy <= 0:
+    if total_corners <= 0:
         base_corners = (
-            hs["gols_pro"] * 1.2 +
+            hs["gols_pro"] * 1.1 +
             aws["gols_pro"] * 1.1 +
-            hs["over15"] * 2.0 +
-            aws["over15"] * 2.0
+            hs["over15"] * 1.8 +
+            aws["over15"] * 1.8
         )
-        p_corner_over75 = clamp(0.42 + base_corners * 0.045, 0.35, 0.88)
-        p_corner_over85 = clamp(0.32 + base_corners * 0.040, 0.22, 0.82)
+        p_corner_over75 = clamp(0.42 + base_corners * 0.045, 0.30, 0.88)
+        p_corner_over85 = clamp(0.32 + base_corners * 0.040, 0.20, 0.82)
     else:
-        p_corner_over75 = clamp(0.40 + total_corners_proxy * 0.035, 0.30, 0.90)
-        p_corner_over85 = clamp(0.28 + total_corners_proxy * 0.032, 0.18, 0.84)
+        p_corner_over75 = clamp(0.40 + total_corners * 0.035, 0.30, 0.90)
+        p_corner_over85 = clamp(0.28 + total_corners * 0.032, 0.18, 0.84)
 
-    if total_shots_proxy <= 0:
-        total_shots_proxy = (
-            hs["gols_pro"] * 4.2 +
-            aws["gols_pro"] * 4.0 +
-            hs["over15"] * 6.0 +
-            aws["over15"] * 6.0
-        )
+    if total_shots <= 0:
+        total_shots = hs["gols_pro"] * 4.0 + aws["gols_pro"] * 4.0 + hs["over15"] * 6 + aws["over15"] * 6
 
-    if total_fouls_proxy <= 0:
-        total_fouls_proxy = 21 + (h2h["media_gols"] * 1.5)
+    if total_cards <= 0:
+        total_cards = 3.2 + (h2h["media_gols"] / 2)
 
-    if total_cards_proxy <= 0:
-        total_cards_proxy = 3.2 + (total_fouls_proxy / 18)
+    if total_fouls <= 0:
+        total_fouls = 21 + (h2h["media_gols"] * 1.2)
 
     mercados = [
         ("Total de Gols: Mais de 1.5", p_over15),
@@ -593,32 +445,24 @@ def calcular_analise_avulsa(jogo):
         ("Total de Escanteios: Mais de 8.5", p_corner_over85),
         ("Dupla Chance: Casa ou Empate", p_1x),
         ("Dupla Chance: Empate ou Fora", p_x2),
-        ("Total de Finalizações: Mais de 19.5", clamp(0.35 + total_shots_proxy * 0.020, 0.25, 0.88)),
-        ("Total de Finalizações: Mais de 23.5", clamp(0.22 + total_shots_proxy * 0.017, 0.15, 0.78)),
-        ("Total de Cartões: Mais de 2.5", clamp(0.40 + total_cards_proxy * 0.09, 0.30, 0.92)),
-        ("Total de Cartões: Mais de 3.5", clamp(0.26 + total_cards_proxy * 0.08, 0.18, 0.84)),
-        ("Total de Faltas: Mais de 19.5", clamp(0.42 + total_fouls_proxy * 0.015, 0.30, 0.92)),
-        ("Total de Faltas: Mais de 23.5", clamp(0.28 + total_fouls_proxy * 0.013, 0.18, 0.84)),
+        ("Total de Finalizações: Mais de 19.5", clamp(0.35 + total_shots * 0.020, 0.25, 0.88)),
+        ("Total de Cartões: Mais de 2.5", clamp(0.40 + total_cards * 0.09, 0.30, 0.92)),
+        ("Total de Cartões: Mais de 3.5", clamp(0.26 + total_cards * 0.08, 0.18, 0.84)),
+        ("Total de Faltas: Mais de 19.5", clamp(0.42 + total_fouls * 0.015, 0.30, 0.92)),
+        ("Total de Faltas: Mais de 23.5", clamp(0.28 + total_fouls * 0.013, 0.18, 0.84)),
     ]
 
     mercados.sort(key=lambda x: x[1], reverse=True)
 
     escolhidos = []
     grupos = set()
-
-    def grupo(nome):
-        if nome.startswith("Dupla Chance"):
-            return "dupla_chance"
-        return nome
-
     for nome, prob in mercados:
-        g = grupo(nome)
-        if g in grupos:
+        grupo = "dupla_chance" if nome.startswith("Dupla Chance") else nome
+        if grupo in grupos:
             continue
-        grupos.add(g)
+        grupos.add(grupo)
         escolhidos.append((nome, prob))
 
-    escolhidos.sort(key=lambda x: x[1], reverse=True)
     return escolhidos[:6]
 
 def format_analise_avulsa(jogo, picks):
