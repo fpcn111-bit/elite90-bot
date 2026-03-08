@@ -24,10 +24,14 @@ HEADERS = {
 session = requests.Session()
 session.headers.update(HEADERS)
 
+# =========================================================
+# CONFIG ELITE 10.1
+# =========================================================
+ALLOWED_COMP_CODES = {"DED", "BL1", "PD", "SA", "FL1", "PPL", "ELC"}
+
 LEAGUE_GOAL_PROFILE = {
     "DED": 1.18,   # Eredivisie
     "BL1": 1.12,   # Bundesliga
-    "BSA": 1.10,   # Brazil Série A
     "PD": 0.98,    # LaLiga
     "SA": 1.02,    # Serie A
     "FL1": 1.04,   # Ligue 1
@@ -38,13 +42,15 @@ LEAGUE_GOAL_PROFILE = {
 LEAGUE_CORNER_PROFILE = {
     "DED": 1.02,
     "BL1": 1.08,
-    "BSA": 1.07,
     "PD": 1.10,
     "SA": 1.03,
     "FL1": 1.01,
     "PPL": 0.98,
     "ELC": 1.06,
 }
+
+MIN_GOAL_PROB = 67
+MIN_CORNER_PROB = 63
 
 standings_cache = {}
 
@@ -85,7 +91,19 @@ def fmt_prob(v):
 # =========================================================
 def get_matches_today():
     data = fd_get("/matches", {"status": "SCHEDULED"})
-    return data.get("matches", [])
+    matches = data.get("matches", [])
+    out = []
+
+    for m in matches:
+        comp = m.get("competition", {})
+        code = comp.get("code", "")
+
+        if code not in ALLOWED_COMP_CODES:
+            continue
+
+        out.append(m)
+
+    return out
 
 def get_competition_standings(comp_code):
     if comp_code in standings_cache:
@@ -171,8 +189,8 @@ def calc_goal_score(match_info):
             score -= 1.0
 
     derby_terms = [
-        "milan", "inter", "porto", "benfica", "roma", "lazio",
-        "sevilla", "betis", "lyon", "marseille"
+        "milan", "inter", "porto", "benfica", "roma",
+        "sevilla", "betis", "lyon"
     ]
 
     texto = f"{match_info['home_name']} {match_info['away_name']}".lower()
@@ -183,7 +201,7 @@ def calc_goal_score(match_info):
 
     mercado = "Total de Gols: Mais de 1.5"
 
-    if comp_code in ("PD", "ELC") and score < 67:
+    if comp_code in ("PD", "ELC") and score < 69:
         mercado = "Total de Gols: Menos de 3.5"
         score = clamp(score + 3, 60, 84)
 
@@ -222,7 +240,6 @@ def calc_corner_score(match_info):
             score += 1.5
 
     texto = f"{match_info['home_name']} {match_info['away_name']}".lower()
-
     pressing_terms = [
         "feyenoord", "frankfurt", "roma", "porto", "benfica",
         "betis", "twente", "milan", "inter", "lyon"
@@ -234,7 +251,7 @@ def calc_corner_score(match_info):
     score = clamp(score, 56, 79)
 
     mercado = "Total de Escanteios: Mais de 8.5"
-    if score < 64:
+    if score < 66:
         mercado = "Total de Escanteios: Mais de 7.5"
 
     return mercado, score
@@ -249,6 +266,10 @@ def top_gols(matches):
         info = get_match_info(m)
         try:
             mercado, prob = calc_goal_score(info)
+
+            if prob < MIN_GOAL_PROB:
+                continue
+
             ranking.append({
                 "jogo": f"{info['home_name']} x {info['away_name']}",
                 "liga": info["competition_name"],
@@ -268,6 +289,10 @@ def top_escanteios(matches):
         info = get_match_info(m)
         try:
             mercado, prob = calc_corner_score(info)
+
+            if prob < MIN_CORNER_PROB:
+                continue
+
             ranking.append({
                 "jogo": f"{info['home_name']} x {info['away_name']}",
                 "liga": info["competition_name"],
@@ -287,12 +312,12 @@ def format_topgols(matches):
     ranking = top_gols(matches)
 
     if not ranking:
-        return "🔥 TOP 10 GOLS\n\nNenhuma oportunidade encontrada."
+        return "🔥 TOP 10 GOLS\n\nNenhuma oportunidade forte encontrada."
 
     msg = "🔥 TOP 10 GOLS\n\n"
 
-    for item in ranking:
-        msg += f"{item['jogo']}\n"
+    for i, item in enumerate(ranking, start=1):
+        msg += f"{i}. {item['jogo']}\n"
         msg += f"{item['mercado']}\n"
         msg += f"Probabilidade: {fmt_prob(item['prob'])}%\n"
         msg += f"{item['liga']}\n\n"
@@ -303,12 +328,12 @@ def format_topescanteios(matches):
     ranking = top_escanteios(matches)
 
     if not ranking:
-        return "🚩 TOP 10 ESCANTEIOS\n\nNenhuma oportunidade encontrada."
+        return "🚩 TOP 10 ESCANTEIOS\n\nNenhuma oportunidade forte encontrada."
 
     msg = "🚩 TOP 10 ESCANTEIOS\n\n"
 
-    for item in ranking:
-        msg += f"{item['jogo']}\n"
+    for i, item in enumerate(ranking, start=1):
+        msg += f"{i}. {item['jogo']}\n"
         msg += f"{item['mercado']}\n"
         msg += f"Probabilidade: {fmt_prob(item['prob'])}%\n"
         msg += f"{item['liga']}\n\n"
@@ -320,7 +345,7 @@ def format_topescanteios(matches):
 # =========================================================
 @app.route("/")
 def home():
-    return "ELITE 10.0 online"
+    return "ELITE 10.1 online"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -335,7 +360,7 @@ def webhook():
     if text in ("/start", "start"):
         send(
             chat_id,
-            "🤖 ELITE 10.0 online ✅\n\n"
+            "🤖 ELITE 10.1 online ✅\n\n"
             "Comandos:\n"
             "/teste\n"
             "/topgols\n"
@@ -343,7 +368,7 @@ def webhook():
         )
 
     elif text == "/teste":
-        send(chat_id, "✅ ELITE 10.0 funcionando")
+        send(chat_id, "✅ ELITE 10.1 funcionando")
 
     elif text == "/topgols":
         try:
