@@ -261,6 +261,9 @@ def calc_corner_score(match_info):
 # =========================================================
 def top_gols(matches):
     ranking = []
+    jogos_usados = set()
+
+    candidatos = []
 
     for m in matches:
         info = get_match_info(m)
@@ -270,7 +273,7 @@ def top_gols(matches):
             if prob < MIN_GOAL_PROB:
                 continue
 
-            ranking.append({
+            candidatos.append({
                 "jogo": f"{info['home_name']} x {info['away_name']}",
                 "liga": info["competition_name"],
                 "mercado": mercado,
@@ -279,11 +282,23 @@ def top_gols(matches):
         except Exception:
             continue
 
-    ranking.sort(key=lambda x: x["prob"], reverse=True)
-    return ranking[:10]
+    candidatos.sort(key=lambda x: x["prob"], reverse=True)
+
+    for item in candidatos:
+        if item["jogo"] in jogos_usados:
+            continue
+        jogos_usados.add(item["jogo"])
+        ranking.append(item)
+        if len(ranking) >= 10:
+            break
+
+    return ranking
 
 def top_escanteios(matches):
     ranking = []
+    jogos_usados = set()
+
+    candidatos = []
 
     for m in matches:
         info = get_match_info(m)
@@ -293,7 +308,7 @@ def top_escanteios(matches):
             if prob < MIN_CORNER_PROB:
                 continue
 
-            ranking.append({
+            candidatos.append({
                 "jogo": f"{info['home_name']} x {info['away_name']}",
                 "liga": info["competition_name"],
                 "mercado": mercado,
@@ -302,8 +317,17 @@ def top_escanteios(matches):
         except Exception:
             continue
 
-    ranking.sort(key=lambda x: x["prob"], reverse=True)
-    return ranking[:10]
+    candidatos.sort(key=lambda x: x["prob"], reverse=True)
+
+    for item in candidatos:
+        if item["jogo"] in jogos_usados:
+            continue
+        jogos_usados.add(item["jogo"])
+        ranking.append(item)
+        if len(ranking) >= 10:
+            break
+
+    return ranking
 
 # =========================================================
 # FORMATTERS
@@ -312,9 +336,9 @@ def format_topgols(matches):
     ranking = top_gols(matches)
 
     if not ranking:
-        return "🔥 TOP 10 GOLS\n\nNenhuma oportunidade forte encontrada."
+        return "🔥 TOP GOLS\n\nNenhuma oportunidade forte encontrada."
 
-    msg = "🔥 TOP 10 GOLS\n\n"
+    msg = f"🔥 TOP {len(ranking)} GOLS\n\n"
 
     for i, item in enumerate(ranking, start=1):
         msg += f"{i}. {item['jogo']}\n"
@@ -328,9 +352,9 @@ def format_topescanteios(matches):
     ranking = top_escanteios(matches)
 
     if not ranking:
-        return "🚩 TOP 10 ESCANTEIOS\n\nNenhuma oportunidade forte encontrada."
+        return "🚩 TOP ESCANTEIOS\n\nNenhuma oportunidade forte encontrada."
 
-    msg = "🚩 TOP 10 ESCANTEIOS\n\n"
+    msg = f"🚩 TOP {len(ranking)} ESCANTEIOS\n\n"
 
     for i, item in enumerate(ranking, start=1):
         msg += f"{i}. {item['jogo']}\n"
