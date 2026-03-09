@@ -26,7 +26,7 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 # =========================================================
-# CONFIG ELITE 12.1
+# CONFIG ELITE 12.2
 # =========================================================
 
 ALLOWED_LEAGUES = {
@@ -98,10 +98,13 @@ LEAGUE_CORNER_PROFILE = {
 MIN_GOAL_PROB = 66
 MIN_CORNER_PROB = 64
 MIN_STRONG_PROB = 70
-
 MAX_PREDICTION_CALLS = 18
 
 predictions_cache = {}
+matches_cache = {
+    "date": None,
+    "matches": []
+}
 
 # =========================================================
 # HELPERS
@@ -147,12 +150,37 @@ def confidence(prob):
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
+def normalize_text(text):
+    return (
+        text.lower()
+        .replace("á", "a")
+        .replace("à", "a")
+        .replace("â", "a")
+        .replace("ã", "a")
+        .replace("é", "e")
+        .replace("ê", "e")
+        .replace("í", "i")
+        .replace("ó", "o")
+        .replace("ô", "o")
+        .replace("õ", "o")
+        .replace("ú", "u")
+        .replace("ç", "c")
+        .replace(".", "")
+        .replace(",", "")
+        .replace("-", " ")
+        .replace("  ", " ")
+        .strip()
+    )
+
 # =========================================================
 # BUSCAR JOGOS DO DIA
 # =========================================================
 
 def get_matches_today():
     today = datetime.utcnow().strftime("%Y-%m-%d")
+
+    if matches_cache["date"] == today and matches_cache["matches"]:
+        return matches_cache["matches"]
 
     data = api_get("/fixtures", {"date": today})
     matches = []
@@ -169,6 +197,8 @@ def get_matches_today():
 
         matches.append(m)
 
+    matches_cache["date"] = today
+    matches_cache["matches"] = matches
     return matches
 
 # =========================================================
@@ -346,7 +376,7 @@ def apply_prediction_to_corner_score(base_score, pred):
     return clamp(score, 56, 82)
 
 # =========================================================
-# ENRIQUECER CANDIDATOS
+# BUILD CANDIDATES
 # =========================================================
 
 def build_goal_candidates(matches):
@@ -355,11 +385,7 @@ def build_goal_candidates(matches):
     for m in matches:
         info = get_match_info(m)
         base = base_goal_score(info)
-
-        raw.append({
-            "info": info,
-            "base": base
-        })
+        raw.append({"info": info, "base": base})
 
     raw.sort(key=lambda x: x["base"], reverse=True)
 
@@ -399,11 +425,7 @@ def build_corner_candidates(matches):
     for m in matches:
         info = get_match_info(m)
         base = base_corner_score(info)
-
-        raw.append({
-            "info": info,
-            "base": base
-        })
+        raw.append({"info": info, "base": base})
 
     raw.sort(key=lambda x: x["base"], reverse=True)
 
@@ -507,6 +529,111 @@ def top_fortes(matches):
     return ranking
 
 # =========================================================
+# ANALISE POR JOGO
+# =========================================================
+
+def find_match_by_text(matches, query):
+    q = normalize_text(query)
+
+    if " x " not in q:
+        return None
+
+    left, right = q.split(" x ", 1)
+    left = left.strip()
+    right = right.strip()
+
+    best = None
+    best_score = -1
+
+    for m in matches:
+        info = get_match_info(m)
+        home = normalize_text(info["home_name"])
+        away = normalize_text(info["away_name"])
+
+        score = 0
+
+        if left in home:
+            score += 2
+        if right in away:
+            score += 2
+
+        if left == home:
+            score += 2
+        if right == away:
+            score += 2
+
+        if score > best_score:
+            best_score = score
+            best = m
+
+    if best_score < 2:
+        return None
+
+    return best
+
+def analysis_from_prediction(pred, info):
+    base_goals = base_goal_score(info)
+    base_corners = base_corner_score(info)
+
+    over15 = apply_prediction_to_goal_score(base_goals, pred)
+    over25 = clamp(over15 - 7, 45, 82)
+    btts = clamp(over15 - 9, 42, 78)
+    corners85 = apply_prediction_to_corner_score(base_corners, pred)
+    corners75 = clamp(corners85 + 2, 50, 84)
+
+    recommendations = [
+        ("Total de Gols: Mais de 1.5", over15),
+        ("Total de Gols: Mais de 2.5", over25),
+        ("BTTS: Sim", btts),
+        ("Total de Escanteios: Mais de 7.5", corners75),
+        ("Total de Escanteios: Mais de 8.5", corners85),
+    ]
+
+    recommendations.sort(key=lambda x: x[1], reverse=True)
+    best_market, best_prob = recommendations[0]
+
+    msg = f"📊 ANÁLISE DO JOGO\n\n"
+    msg += f"{info['home_name']} x {info['away_name']}\n"
+    msg += f"{info['league_name']}\n\n"
+
+    msg += f"Over 1.5 gols: {fmt_prob(over15)}% ({confidence(over15)})\n"
+    msg += f"Over 2.5 gols: {fmt_prob(over25)}% ({confidence(over25)})\n"
+    msg += f"BTTS Sim: {fmt_prob(btts)}% ({confidence(btts)})\n"
+    msg += f"Escanteios +7.5: {fmt_prob(corners75)}% ({confidence(corners75)})\n"
+    msg += f"Escanteios +8.5: {fmt_prob(corners85)}% ({confidence(corners85)})\n\n"
+
+    msg += f"Melhor mercado:\n{best_market}\n"
+    msg += f"Probabilidade: {fmt_prob(best_prob)}%\n"
+    msg += f"Faixa: {confidence(best_prob)}"
+
+    return msg
+
+def analyze_match_command(text, matches):
+    query = text[len("/analise"):].strip()
+
+    if not query:
+        return (
+            "Use assim:\n"
+            "/analise Time da Casa x Time de Fora\n\n"
+            "Exemplo:\n"
+            "/analise Al Nassr x Al Hilal"
+        )
+
+    match = find_match_by_text(matches, query)
+
+    if not match:
+        return (
+            "Não encontrei esse jogo na lista de hoje.\n\n"
+            "Use assim:\n"
+            "/analise Time da Casa x Time de Fora"
+        )
+
+    info = get_match_info(match)
+    pred = get_prediction(info["fixture_id"])
+
+    return analysis_from_prediction(pred, info)
+
+# =========================================================
 # FORMATAR
 # =========================================================
 
@@ -532,7 +659,7 @@ def format_list(title, ranking):
 
 @app.route("/")
 def home():
-    return "ELITE 12.1 online"
+    return "ELITE 12.2 online"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -548,16 +675,17 @@ def webhook():
     if text in ("/start", "start"):
         send(
             chat_id,
-            "🤖 ELITE 12.1 online ✅\n\n"
+            "🤖 ELITE 12.2 online ✅\n\n"
             "Comandos:\n"
             "/teste\n"
             "/topgols\n"
             "/topescanteios\n"
-            "/topfortes"
+            "/topfortes\n"
+            "/analise Time A x Time B"
         )
 
     elif text == "/teste":
-        send(chat_id, "✅ ELITE 12.1 funcionando")
+        send(chat_id, "✅ ELITE 12.2 funcionando")
 
     elif text == "/topgols":
         try:
@@ -580,6 +708,13 @@ def webhook():
         except Exception as e:
             send(chat_id, f"Erro no topfortes: {type(e).__name__} - {e}")
 
+    elif text.lower().startswith("/analise"):
+        try:
+            matches = get_matches_today()
+            send(chat_id, analyze_match_command(text, matches))
+        except Exception as e:
+            send(chat_id, f"Erro no analise: {type(e).__name__} - {e}")
+
     else:
         send(
             chat_id,
@@ -587,7 +722,8 @@ def webhook():
             "/teste\n"
             "/topgols\n"
             "/topescanteios\n"
-            "/topfortes"
+            "/topfortes\n"
+            "/analise Time A x Time B"
         )
 
     return {"ok": True}
