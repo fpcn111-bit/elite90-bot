@@ -26,41 +26,65 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 # =========================================================
-# CONFIG ELITE 10.4
+# CONFIG ELITE 10.5
 # =========================================================
 ALLOWED_COMP_CODES = {
     "DED",   # Eredivisie
-    "BL1",   # Bundesliga
-    "PD",    # La Liga
-    "SA",    # Serie A
-    "FL1",   # Ligue 1
+    "BSA",   # Brasileirao Serie A
+    "ELC",   # Championship
     "PPL",   # Primeira Liga
-    "ELC"    # Championship
+    "EC",    # European Championship (se aparecer)
+    "FL1",   # Ligue 1
+    "BL1",   # Bundesliga
+    "SA",    # Serie A
+    "PD",    # La Liga
+    "CLI",   # Libertadores (quando houver)
+    "CL",    # Champions League
+    "WC",    # World Cup (quando houver)
+    "PL",    # Premier League
+    "BL2",   # Bundesliga 2
+    "SD",    # Segunda Divisao Espanha
 }
 
 LEAGUE_GOAL_PROFILE = {
     "DED": 1.18,
-    "BL1": 1.12,
-    "PD": 0.98,
-    "SA": 1.02,
-    "FL1": 1.04,
-    "PPL": 1.03,
+    "BSA": 1.06,
     "ELC": 1.01,
+    "PPL": 1.03,
+    "EC": 1.00,
+    "FL1": 1.04,
+    "BL1": 1.12,
+    "SA": 1.02,
+    "PD": 0.98,
+    "CLI": 0.96,
+    "CL": 1.05,
+    "WC": 0.95,
+    "PL": 1.09,
+    "BL2": 1.11,
+    "SD": 0.97,
 }
 
 LEAGUE_CORNER_PROFILE = {
     "DED": 1.02,
-    "BL1": 1.08,
-    "PD": 1.10,
-    "SA": 1.03,
-    "FL1": 1.01,
-    "PPL": 0.98,
+    "BSA": 1.04,
     "ELC": 1.06,
+    "PPL": 0.98,
+    "EC": 1.00,
+    "FL1": 1.01,
+    "BL1": 1.08,
+    "SA": 1.03,
+    "PD": 1.10,
+    "CLI": 1.01,
+    "CL": 1.03,
+    "WC": 0.99,
+    "PL": 1.09,
+    "BL2": 1.07,
+    "SD": 1.05,
 }
 
-MIN_GOAL_PROB = 67
-MIN_CORNER_PROB = 65
-MIN_STRONG_PROB = 70
+MIN_GOAL_PROB = 66
+MIN_CORNER_PROB = 64
+MIN_STRONG_PROB = 69
 
 standings_cache = {}
 
@@ -110,7 +134,7 @@ def get_confidence(prob):
     return "FRACA"
 
 # =========================================================
-# BUSCAR JOGOS DO DIA INTEIRO
+# BUSCAR JOGOS DO DIA
 # =========================================================
 def get_matches_today():
     today_utc = datetime.now(timezone.utc).date()
@@ -132,7 +156,6 @@ def get_matches_today():
             continue
 
         status = (m.get("status") or "").upper()
-
         if status not in ("SCHEDULED", "TIMED"):
             continue
 
@@ -235,21 +258,34 @@ def calc_goal_score(info):
         if home_pos >= 15 and away_pos >= 15:
             score -= 1.0
 
-    derby_terms = [
-        "milan", "inter", "porto", "benfica", "roma",
-        "sevilla", "betis", "lyon"
-    ]
+        if diff >= 14:
+            score -= 0.5
 
     texto = f"{info['home_name']} {info['away_name']}".lower()
+
+    derby_terms = [
+        "milan", "inter", "porto", "benfica", "roma",
+        "sevilla", "betis", "lyon", "galatasaray",
+        "fenerbahce", "celtic", "rangers"
+    ]
 
     if any(term in texto for term in derby_terms):
         score -= 1.5
 
-    score = clamp(score, 58, 82)
+    attacking_terms = [
+        "ajax", "psv", "feyenoord", "bayern", "leverkusen",
+        "atalanta", "sporting", "benfica", "porto",
+        "manchester city", "arsenal", "liverpool"
+    ]
+
+    if any(term in texto for term in attacking_terms):
+        score += 1.0
+
+    score = clamp(score, 58, 83)
 
     mercado = "Total de Gols: Mais de 1.5"
 
-    if comp_code in ("PD", "ELC") and score < 69:
+    if comp_code in ("PD", "ELC", "SD") and score < 68:
         mercado = "Total de Gols: Menos de 3.5"
         score = clamp(score + 3, 60, 84)
 
@@ -294,21 +330,25 @@ def calc_corner_score(info):
 
     pressing_terms = [
         "feyenoord", "frankfurt", "roma", "porto", "benfica",
-        "betis", "twente", "milan", "inter", "lyon"
+        "betis", "twente", "milan", "inter", "lyon",
+        "liverpool", "arsenal", "leverkusen", "psv",
+        "ajax", "sporting", "atalanta"
     ]
 
     if any(term in texto for term in pressing_terms):
         score += 1.5
 
-    derby_terms = ["milan", "inter", "roma", "betis", "sevilla"]
+    derby_terms = [
+        "milan", "inter", "roma", "betis", "sevilla",
+        "galatasaray", "fenerbahce", "celtic", "rangers"
+    ]
 
     if any(term in texto for term in derby_terms):
         score -= 0.5
 
-    score = clamp(score, 56, 79)
+    score = clamp(score, 56, 80)
 
     mercado = "Total de Escanteios: Mais de 8.5"
-
     if score < 68:
         mercado = "Total de Escanteios: Mais de 7.5"
 
@@ -472,7 +512,7 @@ def format_list(title, ranking):
 # =========================================================
 @app.route("/")
 def home():
-    return "ELITE 10.4 online"
+    return "ELITE 10.5 online"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -488,7 +528,7 @@ def webhook():
     if text in ("/start", "start"):
         send(
             chat_id,
-            "🤖 ELITE 10.4 online ✅\n\n"
+            "🤖 ELITE 10.5 online ✅\n\n"
             "Comandos:\n"
             "/teste\n"
             "/topgols\n"
@@ -497,7 +537,7 @@ def webhook():
         )
 
     elif text == "/teste":
-        send(chat_id, "✅ ELITE 10.4 funcionando")
+        send(chat_id, "✅ ELITE 10.5 funcionando")
 
     elif text == "/topgols":
         try:
