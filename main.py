@@ -25,7 +25,7 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 # =========================================================
-# CONFIG ELITE 10.1
+# CONFIG ELITE 10.2
 # =========================================================
 ALLOWED_COMP_CODES = {"DED", "BL1", "PD", "SA", "FL1", "PPL", "ELC"}
 
@@ -50,7 +50,8 @@ LEAGUE_CORNER_PROFILE = {
 }
 
 MIN_GOAL_PROB = 67
-MIN_CORNER_PROB = 63
+MIN_CORNER_PROB = 65
+MIN_STRONG_PROB = 70
 
 standings_cache = {}
 
@@ -85,6 +86,16 @@ def clamp(v, lo, hi):
 
 def fmt_prob(v):
     return int(round(v))
+
+def get_confidence_label(prob):
+    p = fmt_prob(prob)
+    if p >= 75:
+        return "MUITO FORTE"
+    elif p >= 70:
+        return "BOA"
+    elif p >= 65:
+        return "ACEITÁVEL"
+    return "FRACA"
 
 # =========================================================
 # DADOS
@@ -239,6 +250,9 @@ def calc_corner_score(match_info):
         if diff >= 12:
             score += 1.5
 
+        if home_pos <= 5 or away_pos <= 5:
+            score += 1.0
+
     texto = f"{match_info['home_name']} {match_info['away_name']}".lower()
     pressing_terms = [
         "feyenoord", "frankfurt", "roma", "porto", "benfica",
@@ -248,10 +262,14 @@ def calc_corner_score(match_info):
     if any(term in texto for term in pressing_terms):
         score += 1.5
 
+    derby_terms = ["milan", "inter", "roma", "betis", "sevilla"]
+    if any(term in texto for term in derby_terms):
+        score -= 0.5
+
     score = clamp(score, 56, 79)
 
     mercado = "Total de Escanteios: Mais de 8.5"
-    if score < 66:
+    if score < 68:
         mercado = "Total de Escanteios: Mais de 7.5"
 
     return mercado, score
@@ -262,7 +280,6 @@ def calc_corner_score(match_info):
 def top_gols(matches):
     ranking = []
     jogos_usados = set()
-
     candidatos = []
 
     for m in matches:
@@ -274,10 +291,12 @@ def top_gols(matches):
                 continue
 
             candidatos.append({
+                "tipo": "GOLS",
                 "jogo": f"{info['home_name']} x {info['away_name']}",
                 "liga": info["competition_name"],
                 "mercado": mercado,
-                "prob": prob
+                "prob": prob,
+                "faixa": get_confidence_label(prob)
             })
         except Exception:
             continue
@@ -297,7 +316,6 @@ def top_gols(matches):
 def top_escanteios(matches):
     ranking = []
     jogos_usados = set()
-
     candidatos = []
 
     for m in matches:
@@ -309,10 +327,12 @@ def top_escanteios(matches):
                 continue
 
             candidatos.append({
+                "tipo": "ESCANTEIOS",
                 "jogo": f"{info['home_name']} x {info['away_name']}",
                 "liga": info["competition_name"],
                 "mercado": mercado,
-                "prob": prob
+                "prob": prob,
+                "faixa": get_confidence_label(prob)
             })
         except Exception:
             continue
@@ -323,6 +343,55 @@ def top_escanteios(matches):
         if item["jogo"] in jogos_usados:
             continue
         jogos_usados.add(item["jogo"])
+        ranking.append(item)
+        if len(ranking) >= 10:
+            break
+
+    return ranking
+
+def top_fortes(matches):
+    ranking = []
+    usados = set()
+    candidatos = []
+
+    for m in matches:
+        info = get_match_info(m)
+
+        try:
+            mercado_g, prob_g = calc_goal_score(info)
+            if prob_g >= MIN_STRONG_PROB:
+                candidatos.append({
+                    "tipo": "GOLS",
+                    "jogo": f"{info['home_name']} x {info['away_name']}",
+                    "liga": info["competition_name"],
+                    "mercado": mercado_g,
+                    "prob": prob_g,
+                    "faixa": get_confidence_label(prob_g)
+                })
+        except Exception:
+            pass
+
+        try:
+            mercado_c, prob_c = calc_corner_score(info)
+            if prob_c >= MIN_STRONG_PROB:
+                candidatos.append({
+                    "tipo": "ESCANTEIOS",
+                    "jogo": f"{info['home_name']} x {info['away_name']}",
+                    "liga": info["competition_name"],
+                    "mercado": mercado_c,
+                    "prob": prob_c,
+                    "faixa": get_confidence_label(prob_c)
+                })
+        except Exception:
+            pass
+
+    candidatos.sort(key=lambda x: x["prob"], reverse=True)
+
+    for item in candidatos:
+        chave = (item["jogo"], item["tipo"])
+        if chave in usados:
+            continue
+        usados.add(chave)
         ranking.append(item)
         if len(ranking) >= 10:
             break
@@ -344,6 +413,7 @@ def format_topgols(matches):
         msg += f"{i}. {item['jogo']}\n"
         msg += f"{item['mercado']}\n"
         msg += f"Probabilidade: {fmt_prob(item['prob'])}%\n"
+        msg += f"Faixa: {item['faixa']}\n"
         msg += f"{item['liga']}\n\n"
 
     return msg
@@ -360,6 +430,24 @@ def format_topescanteios(matches):
         msg += f"{i}. {item['jogo']}\n"
         msg += f"{item['mercado']}\n"
         msg += f"Probabilidade: {fmt_prob(item['prob'])}%\n"
+        msg += f"Faixa: {item['faixa']}\n"
+        msg += f"{item['liga']}\n\n"
+
+    return msg
+
+def format_topfortes(matches):
+    ranking = top_fortes(matches)
+
+    if not ranking:
+        return "💎 TOP FORTES\n\nNenhuma oportunidade premium encontrada hoje."
+
+    msg = f"💎 TOP {len(ranking)} FORTES\n\n"
+
+    for i, item in enumerate(ranking, start=1):
+        msg += f"{i}. [{item['tipo']}] {item['jogo']}\n"
+        msg += f"{item['mercado']}\n"
+        msg += f"Probabilidade: {fmt_prob(item['prob'])}%\n"
+        msg += f"Faixa: {item['faixa']}\n"
         msg += f"{item['liga']}\n\n"
 
     return msg
@@ -369,7 +457,7 @@ def format_topescanteios(matches):
 # =========================================================
 @app.route("/")
 def home():
-    return "ELITE 10.1 online"
+    return "ELITE 10.2 online"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -384,15 +472,16 @@ def webhook():
     if text in ("/start", "start"):
         send(
             chat_id,
-            "🤖 ELITE 10.1 online ✅\n\n"
+            "🤖 ELITE 10.2 online ✅\n\n"
             "Comandos:\n"
             "/teste\n"
             "/topgols\n"
-            "/topescanteios"
+            "/topescanteios\n"
+            "/topfortes"
         )
 
     elif text == "/teste":
-        send(chat_id, "✅ ELITE 10.1 funcionando")
+        send(chat_id, "✅ ELITE 10.2 funcionando")
 
     elif text == "/topgols":
         try:
@@ -408,13 +497,21 @@ def webhook():
         except Exception as e:
             send(chat_id, f"Erro no topescanteios: {type(e).__name__} - {e}")
 
+    elif text == "/topfortes":
+        try:
+            matches = get_matches_today()
+            send(chat_id, format_topfortes(matches))
+        except Exception as e:
+            send(chat_id, f"Erro no topfortes: {type(e).__name__} - {e}")
+
     else:
         send(
             chat_id,
             "Comandos:\n"
             "/teste\n"
             "/topgols\n"
-            "/topescanteios"
+            "/topescanteios\n"
+            "/topfortes"
         )
 
     return {"ok": True}
