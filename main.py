@@ -1,5 +1,4 @@
 import os
-import math
 import unicodedata
 import requests
 from flask import Flask, request
@@ -28,7 +27,7 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 # =========================================================
-# CONFIG ELITE 13.0
+# CONFIG ELITE 13.1
 # =========================================================
 
 ALLOWED_LEAGUES = {
@@ -159,21 +158,57 @@ def clamp(v, lo, hi):
 
 def normalize_text(text):
     text = (text or "").lower().strip()
+
+    text = text.replace("ı", "i")
+    text = text.replace("İ", "i")
+    text = text.replace("ş", "s")
+    text = text.replace("Ş", "s")
+    text = text.replace("ğ", "g")
+    text = text.replace("Ğ", "g")
+    text = text.replace("ü", "u")
+    text = text.replace("Ü", "u")
+    text = text.replace("ö", "o")
+    text = text.replace("Ö", "o")
+    text = text.replace("ç", "c")
+    text = text.replace("Ç", "c")
+
     text = unicodedata.normalize("NFD", text)
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
-    text = (
-        text.replace(".", " ")
-        .replace(",", " ")
-        .replace("-", " ")
-        .replace("/", " ")
-        .replace("(", " ")
-        .replace(")", " ")
-    )
+
+    for ch in [".", ",", "-", "/", "(", ")", "'", '"', ":", ";"]:
+        text = text.replace(ch, " ")
+
+    aliases = {
+        "s k": "",
+        "sk": "",
+        "fk": "",
+        "fc": "",
+        "cf": "",
+        "ac": "",
+        "sc": "",
+        "cd": "",
+        "ud": "",
+        "bk": "",
+        "jk": ""
+    }
+
+    words = text.split()
+    clean_words = []
+
+    for w in words:
+        if w in aliases:
+            continue
+        clean_words.append(w)
+
+    text = " ".join(clean_words)
 
     while "  " in text:
         text = text.replace("  ", " ")
 
     return text.strip()
+
+def token_set(text):
+    return set(normalize_text(text).split())
 
 def fair_odd_from_prob(prob):
     p = max(1.0, float(prob))
@@ -589,6 +624,35 @@ def theoretical_value_bets(matches):
 # ANALISE POR JOGO
 # =========================================================
 
+def match_side_score(query_side, team_name):
+    q = normalize_text(query_side)
+    t = normalize_text(team_name)
+
+    if not q or not t:
+        return 0
+
+    q_tokens = token_set(q)
+    t_tokens = token_set(t)
+
+    score = 0
+
+    if q == t:
+        score += 12
+
+    if q in t:
+        score += 8
+
+    if t.startswith(q):
+        score += 5
+
+    common = q_tokens.intersection(t_tokens)
+    score += len(common) * 3
+
+    if q.replace(" ", "") == t.replace(" ", ""):
+        score += 6
+
+    return score
+
 def find_match_by_text(matches, query):
     q = normalize_text(query)
 
@@ -604,31 +668,17 @@ def find_match_by_text(matches, query):
 
     for m in matches:
         info = get_match_info(m)
-        home = normalize_text(info["home_name"])
-        away = normalize_text(info["away_name"])
 
-        score = 0
+        home_score = match_side_score(left, info["home_name"])
+        away_score = match_side_score(right, info["away_name"])
 
-        if left in home:
-            score += 3
-        if right in away:
-            score += 3
+        total = home_score + away_score
 
-        if home.startswith(left):
-            score += 2
-        if away.startswith(right):
-            score += 2
-
-        if left == home:
-            score += 3
-        if right == away:
-            score += 3
-
-        if score > best_score:
-            best_score = score
+        if total > best_score:
+            best_score = total
             best = m
 
-    if best_score < 3:
+    if best_score < 8:
         return None
 
     return best
@@ -684,11 +734,20 @@ def analyze_match_command(text, matches):
     match = find_match_by_text(matches, query)
 
     if not match:
-        return (
-            "Não encontrei esse jogo na lista de hoje.\n\n"
-            "Use assim:\n"
-            "/analise Time da Casa x Time de Fora"
-        )
+        exemplos = []
+        for m in matches[:5]:
+            info = get_match_info(m)
+            exemplos.append(f"{info['home_name']} x {info['away_name']}")
+
+        msg = "Não encontrei esse jogo na lista de hoje.\n\n"
+        msg += "Use assim:\n/analise Time da Casa x Time de Fora"
+
+        if exemplos:
+            msg += "\n\nExemplos de hoje:\n"
+            for ex in exemplos[:3]:
+                msg += f"- {ex}\n"
+
+        return msg
 
     info = get_match_info(match)
     pred = get_prediction(info["fixture_id"])
@@ -772,7 +831,7 @@ def format_valuebets(ranking):
 
 @app.route("/")
 def home():
-    return "ELITE 13.0 online"
+    return "ELITE 13.1 online"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -788,7 +847,7 @@ def webhook():
     if text in ("/start", "start"):
         send(
             chat_id,
-            "🤖 ELITE 13.0 online ✅\n\n"
+            "🤖 ELITE 13.1 online ✅\n\n"
             "Comandos:\n"
             "/teste\n"
             "/topgols\n"
@@ -800,7 +859,7 @@ def webhook():
         )
 
     elif text == "/teste":
-        send(chat_id, "✅ ELITE 13.0 funcionando")
+        send(chat_id, "✅ ELITE 13.1 funcionando")
 
     elif text == "/topgols":
         try:
