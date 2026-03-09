@@ -1,4 +1,6 @@
 import os
+import math
+import unicodedata
 import requests
 from flask import Flask, request
 from datetime import datetime
@@ -26,7 +28,7 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 # =========================================================
-# CONFIG ELITE 12.2
+# CONFIG ELITE 13.0
 # =========================================================
 
 ALLOWED_LEAGUES = {
@@ -98,6 +100,8 @@ LEAGUE_CORNER_PROFILE = {
 MIN_GOAL_PROB = 66
 MIN_CORNER_PROB = 64
 MIN_STRONG_PROB = 70
+MIN_VALUE_PROB = 68
+
 MAX_PREDICTION_CALLS = 18
 
 predictions_cache = {}
@@ -136,6 +140,9 @@ def set_webhook():
 def fmt_prob(v):
     return int(round(v))
 
+def fmt_odd(v):
+    return f"{v:.2f}"
+
 def confidence(prob):
     p = fmt_prob(prob)
 
@@ -151,26 +158,37 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 def normalize_text(text):
-    return (
-        text.lower()
-        .replace("á", "a")
-        .replace("à", "a")
-        .replace("â", "a")
-        .replace("ã", "a")
-        .replace("é", "e")
-        .replace("ê", "e")
-        .replace("í", "i")
-        .replace("ó", "o")
-        .replace("ô", "o")
-        .replace("õ", "o")
-        .replace("ú", "u")
-        .replace("ç", "c")
-        .replace(".", "")
-        .replace(",", "")
+    text = (text or "").lower().strip()
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    text = (
+        text.replace(".", " ")
+        .replace(",", " ")
         .replace("-", " ")
-        .replace("  ", " ")
-        .strip()
+        .replace("/", " ")
+        .replace("(", " ")
+        .replace(")", " ")
     )
+
+    while "  " in text:
+        text = text.replace("  ", " ")
+
+    return text.strip()
+
+def fair_odd_from_prob(prob):
+    p = max(1.0, float(prob))
+    return 100.0 / p
+
+def value_band(prob):
+    p = fmt_prob(prob)
+
+    if p >= 76:
+        return "VALUE ALTO"
+    if p >= 72:
+        return "VALUE BOM"
+    if p >= 68:
+        return "VALUE MODERADO"
+    return "SEM VALUE"
 
 # =========================================================
 # BUSCAR JOGOS DO DIA
@@ -528,6 +546,45 @@ def top_fortes(matches):
 
     return ranking
 
+def theoretical_value_bets(matches):
+    gols = build_goal_candidates(matches)
+    esc = build_corner_candidates(matches)
+
+    candidatos = []
+
+    for item in gols + esc:
+        if item["prob"] < MIN_VALUE_PROB:
+            continue
+
+        odd_justa = fair_odd_from_prob(item["prob"])
+
+        candidatos.append({
+            "tipo": item["tipo"],
+            "jogo": item["jogo"],
+            "liga": item["liga"],
+            "mercado": item["mercado"],
+            "prob": item["prob"],
+            "faixa": item["faixa"],
+            "odd_justa": odd_justa,
+            "value_faixa": value_band(item["prob"])
+        })
+
+    candidatos.sort(key=lambda x: (x["prob"], -x["odd_justa"]), reverse=True)
+
+    ranking = []
+    usados = set()
+
+    for item in candidatos:
+        chave = (item["jogo"], item["mercado"])
+        if chave in usados:
+            continue
+        usados.add(chave)
+        ranking.append(item)
+        if len(ranking) >= 10:
+            break
+
+    return ranking
+
 # =========================================================
 # ANALISE POR JOGO
 # =========================================================
@@ -553,20 +610,25 @@ def find_match_by_text(matches, query):
         score = 0
 
         if left in home:
-            score += 2
+            score += 3
         if right in away:
+            score += 3
+
+        if home.startswith(left):
+            score += 2
+        if away.startswith(right):
             score += 2
 
         if left == home:
-            score += 2
+            score += 3
         if right == away:
-            score += 2
+            score += 3
 
         if score > best_score:
             best_score = score
             best = m
 
-    if best_score < 2:
+    if best_score < 3:
         return None
 
     return best
@@ -653,13 +715,64 @@ def format_list(title, ranking):
 
     return msg
 
+def format_tophoje(matches):
+    gols = top_gols(matches)[:5]
+    esc = top_escanteios(matches)[:5]
+    fortes = top_fortes(matches)[:3]
+
+    msg = "📅 TOP HOJE\n\n"
+
+    msg += "🔥 GOLS\n"
+    if gols:
+        for i, item in enumerate(gols, start=1):
+            msg += f"{i}. {item['jogo']} - {fmt_prob(item['prob'])}%\n"
+    else:
+        msg += "Nenhuma oportunidade.\n"
+
+    msg += "\n🚩 ESCANTEIOS\n"
+    if esc:
+        for i, item in enumerate(esc, start=1):
+            msg += f"{i}. {item['jogo']} - {fmt_prob(item['prob'])}%\n"
+    else:
+        msg += "Nenhuma oportunidade.\n"
+
+    msg += "\n💎 FORTES\n"
+    if fortes:
+        for i, item in enumerate(fortes, start=1):
+            msg += f"{i}. [{item['tipo']}] {item['jogo']} - {fmt_prob(item['prob'])}%\n"
+    else:
+        msg += "Nenhuma oportunidade.\n"
+
+    return msg
+
+def format_valuebets(ranking):
+    if not ranking:
+        return (
+            "💰 VALUEBETS\n\n"
+            "Nenhum value teórico encontrado.\n\n"
+            "Obs: esta versão usa odd justa do modelo, sem odd real da casa."
+        )
+
+    msg = "💰 VALUEBETS\n\n"
+    msg += "Obs: odd justa do modelo, sem odd real da casa.\n\n"
+
+    for i, item in enumerate(ranking, start=1):
+        msg += f"{i}. [{item['tipo']}] {item['jogo']}\n"
+        msg += f"{item['mercado']}\n"
+        msg += f"Probabilidade: {fmt_prob(item['prob'])}%\n"
+        msg += f"Odd justa: {fmt_odd(item['odd_justa'])}\n"
+        msg += f"Faixa: {item['value_faixa']}\n"
+        msg += f"{item['liga']}\n\n"
+
+    return msg
+
 # =========================================================
 # FLASK
 # =========================================================
 
 @app.route("/")
 def home():
-    return "ELITE 12.2 online"
+    return "ELITE 13.0 online"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -675,17 +788,19 @@ def webhook():
     if text in ("/start", "start"):
         send(
             chat_id,
-            "🤖 ELITE 12.2 online ✅\n\n"
+            "🤖 ELITE 13.0 online ✅\n\n"
             "Comandos:\n"
             "/teste\n"
             "/topgols\n"
             "/topescanteios\n"
             "/topfortes\n"
+            "/tophoje\n"
+            "/valuebets\n"
             "/analise Time A x Time B"
         )
 
     elif text == "/teste":
-        send(chat_id, "✅ ELITE 12.2 funcionando")
+        send(chat_id, "✅ ELITE 13.0 funcionando")
 
     elif text == "/topgols":
         try:
@@ -708,6 +823,20 @@ def webhook():
         except Exception as e:
             send(chat_id, f"Erro no topfortes: {type(e).__name__} - {e}")
 
+    elif text == "/tophoje":
+        try:
+            matches = get_matches_today()
+            send(chat_id, format_tophoje(matches))
+        except Exception as e:
+            send(chat_id, f"Erro no tophoje: {type(e).__name__} - {e}")
+
+    elif text == "/valuebets":
+        try:
+            matches = get_matches_today()
+            send(chat_id, format_valuebets(theoretical_value_bets(matches)))
+        except Exception as e:
+            send(chat_id, f"Erro no valuebets: {type(e).__name__} - {e}")
+
     elif text.lower().startswith("/analise"):
         try:
             matches = get_matches_today()
@@ -723,6 +852,8 @@ def webhook():
             "/topgols\n"
             "/topescanteios\n"
             "/topfortes\n"
+            "/tophoje\n"
+            "/valuebets\n"
             "/analise Time A x Time B"
         )
 
