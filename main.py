@@ -2,7 +2,7 @@ import os
 import unicodedata
 import requests
 from flask import Flask, request
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -27,7 +27,7 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 # =========================================================
-# CONFIG ELITE 13.1
+# CONFIG ELITE 13.2
 # =========================================================
 
 ALLOWED_LEAGUES = {
@@ -104,10 +104,7 @@ MIN_VALUE_PROB = 68
 MAX_PREDICTION_CALLS = 18
 
 predictions_cache = {}
-matches_cache = {
-    "date": None,
-    "matches": []
-}
+matches_cache = {}
 
 # =========================================================
 # HELPERS
@@ -178,25 +175,16 @@ def normalize_text(text):
     for ch in [".", ",", "-", "/", "(", ")", "'", '"', ":", ";"]:
         text = text.replace(ch, " ")
 
-    aliases = {
-        "s k": "",
-        "sk": "",
-        "fk": "",
-        "fc": "",
-        "cf": "",
-        "ac": "",
-        "sc": "",
-        "cd": "",
-        "ud": "",
-        "bk": "",
-        "jk": ""
+    remove_words = {
+        "s", "a", "b", "c", "d",
+        "sk", "fk", "fc", "cf", "ac", "sc", "cd", "ud", "bk", "jk"
     }
 
     words = text.split()
     clean_words = []
 
     for w in words:
-        if w in aliases:
+        if w in remove_words:
             continue
         clean_words.append(w)
 
@@ -226,16 +214,14 @@ def value_band(prob):
     return "SEM VALUE"
 
 # =========================================================
-# BUSCAR JOGOS DO DIA
+# BUSCAR JOGOS
 # =========================================================
 
-def get_matches_today():
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+def get_matches_by_date(date_str):
+    if date_str in matches_cache:
+        return matches_cache[date_str]
 
-    if matches_cache["date"] == today and matches_cache["matches"]:
-        return matches_cache["matches"]
-
-    data = api_get("/fixtures", {"date": today})
+    data = api_get("/fixtures", {"date": date_str})
     matches = []
 
     for m in data.get("response", []):
@@ -250,9 +236,30 @@ def get_matches_today():
 
         matches.append(m)
 
-    matches_cache["date"] = today
-    matches_cache["matches"] = matches
+    matches_cache[date_str] = matches
     return matches
+
+def get_matches_today():
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    return get_matches_by_date(today)
+
+def get_analysis_pool():
+    base_date = datetime.utcnow().date()
+    pool = []
+    usados = set()
+
+    for delta in (-1, 0, 1, 2):
+        day = (base_date + timedelta(days=delta)).strftime("%Y-%m-%d")
+        matches = get_matches_by_date(day)
+
+        for m in matches:
+            fixture_id = m.get("fixture", {}).get("id")
+            if fixture_id in usados:
+                continue
+            usados.add(fixture_id)
+            pool.append(m)
+
+    return pool
 
 # =========================================================
 # BASE FEATURES
@@ -720,7 +727,7 @@ def analysis_from_prediction(pred, info):
 
     return msg
 
-def analyze_match_command(text, matches):
+def analyze_match_command(text):
     query = text[len("/analise"):].strip()
 
     if not query:
@@ -731,20 +738,21 @@ def analyze_match_command(text, matches):
             "/analise Al Nassr x Al Hilal"
         )
 
-    match = find_match_by_text(matches, query)
+    analysis_pool = get_analysis_pool()
+    match = find_match_by_text(analysis_pool, query)
 
     if not match:
         exemplos = []
-        for m in matches[:5]:
+        for m in analysis_pool[:10]:
             info = get_match_info(m)
             exemplos.append(f"{info['home_name']} x {info['away_name']}")
 
-        msg = "Não encontrei esse jogo na lista de hoje.\n\n"
+        msg = "Não encontrei esse jogo na janela de busca.\n\n"
         msg += "Use assim:\n/analise Time da Casa x Time de Fora"
 
         if exemplos:
-            msg += "\n\nExemplos de hoje:\n"
-            for ex in exemplos[:3]:
+            msg += "\n\nExemplos encontrados:\n"
+            for ex in exemplos[:5]:
                 msg += f"- {ex}\n"
 
         return msg
@@ -831,7 +839,7 @@ def format_valuebets(ranking):
 
 @app.route("/")
 def home():
-    return "ELITE 13.1 online"
+    return "ELITE 13.2 online"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -847,7 +855,7 @@ def webhook():
     if text in ("/start", "start"):
         send(
             chat_id,
-            "🤖 ELITE 13.1 online ✅\n\n"
+            "🤖 ELITE 13.2 online ✅\n\n"
             "Comandos:\n"
             "/teste\n"
             "/topgols\n"
@@ -859,7 +867,7 @@ def webhook():
         )
 
     elif text == "/teste":
-        send(chat_id, "✅ ELITE 13.1 funcionando")
+        send(chat_id, "✅ ELITE 13.2 funcionando")
 
     elif text == "/topgols":
         try:
@@ -898,8 +906,7 @@ def webhook():
 
     elif text.lower().startswith("/analise"):
         try:
-            matches = get_matches_today()
-            send(chat_id, analyze_match_command(text, matches))
+            send(chat_id, analyze_match_command(text))
         except Exception as e:
             send(chat_id, f"Erro no analise: {type(e).__name__} - {e}")
 
