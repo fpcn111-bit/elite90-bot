@@ -27,10 +27,12 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 # =========================================================
-# CONFIG ELITE 13.2
+# CONFIG ELITE 14.0
 # =========================================================
 
 ALLOWED_LEAGUES = {
+    2,    # UEFA Champions League
+    3,    # UEFA Europa League
     39,   # Premier League
     140,  # La Liga
     135,  # Serie A
@@ -53,6 +55,8 @@ ALLOWED_LEAGUES = {
 }
 
 LEAGUE_GOAL_PROFILE = {
+    2: 1.08,
+    3: 1.03,
     39: 1.10,
     140: 0.98,
     135: 1.02,
@@ -75,6 +79,8 @@ LEAGUE_GOAL_PROFILE = {
 }
 
 LEAGUE_CORNER_PROFILE = {
+    2: 1.05,
+    3: 1.03,
     39: 1.10,
     140: 1.08,
     135: 1.03,
@@ -96,12 +102,10 @@ LEAGUE_CORNER_PROFILE = {
     307: 1.05
 }
 
-MIN_GOAL_PROB = 66
-MIN_CORNER_PROB = 64
-MIN_STRONG_PROB = 70
-MIN_VALUE_PROB = 68
-
-MAX_PREDICTION_CALLS = 18
+MIN_GOAL_PROB = 65
+MIN_CORNER_PROB = 63
+MIN_STRONG_PROB = 69
+MAX_PREDICTION_CALLS = 20
 
 predictions_cache = {}
 matches_cache = {}
@@ -136,9 +140,6 @@ def set_webhook():
 def fmt_prob(v):
     return int(round(v))
 
-def fmt_odd(v):
-    return f"{v:.2f}"
-
 def confidence(prob):
     p = fmt_prob(prob)
 
@@ -157,17 +158,11 @@ def normalize_text(text):
     text = (text or "").lower().strip()
 
     text = text.replace("ı", "i")
-    text = text.replace("İ", "i")
     text = text.replace("ş", "s")
-    text = text.replace("Ş", "s")
     text = text.replace("ğ", "g")
-    text = text.replace("Ğ", "g")
     text = text.replace("ü", "u")
-    text = text.replace("Ü", "u")
     text = text.replace("ö", "o")
-    text = text.replace("Ö", "o")
     text = text.replace("ç", "c")
-    text = text.replace("Ç", "c")
 
     text = unicodedata.normalize("NFD", text)
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
@@ -176,42 +171,16 @@ def normalize_text(text):
         text = text.replace(ch, " ")
 
     remove_words = {
-        "s", "a", "b", "c", "d",
         "sk", "fk", "fc", "cf", "ac", "sc", "cd", "ud", "bk", "jk"
     }
 
-    words = text.split()
-    clean_words = []
-
-    for w in words:
-        if w in remove_words:
-            continue
-        clean_words.append(w)
-
-    text = " ".join(clean_words)
+    words = [w for w in text.split() if w not in remove_words]
+    text = " ".join(words)
 
     while "  " in text:
         text = text.replace("  ", " ")
 
     return text.strip()
-
-def token_set(text):
-    return set(normalize_text(text).split())
-
-def fair_odd_from_prob(prob):
-    p = max(1.0, float(prob))
-    return 100.0 / p
-
-def value_band(prob):
-    p = fmt_prob(prob)
-
-    if p >= 76:
-        return "VALUE ALTO"
-    if p >= 72:
-        return "VALUE BOM"
-    if p >= 68:
-        return "VALUE MODERADO"
-    return "SEM VALUE"
 
 # =========================================================
 # BUSCAR JOGOS
@@ -246,30 +215,27 @@ def get_matches_today():
 def get_analysis_pool():
     base_date = datetime.utcnow().date()
     pool = []
-    usados = set()
+    used = set()
 
     for delta in (-1, 0, 1, 2):
-        day = (base_date + timedelta(days=delta)).strftime("%Y-%m-%d")
-        matches = get_matches_by_date(day)
-
-        for m in matches:
+        date_str = (base_date + timedelta(days=delta)).strftime("%Y-%m-%d")
+        for m in get_matches_by_date(date_str):
             fixture_id = m.get("fixture", {}).get("id")
-            if fixture_id in usados:
+            if fixture_id in used:
                 continue
-            usados.add(fixture_id)
+            used.add(fixture_id)
             pool.append(m)
 
     return pool
 
 # =========================================================
-# BASE FEATURES
+# MATCH INFO
 # =========================================================
 
 def get_match_info(match):
     fixture = match.get("fixture", {})
     league = match.get("league", {})
     teams = match.get("teams", {})
-
     home = teams.get("home", {})
     away = teams.get("away", {})
 
@@ -279,13 +245,17 @@ def get_match_info(match):
         "league_name": league.get("name", ""),
         "home_name": home.get("name", "Casa"),
         "away_name": away.get("name", "Fora"),
-        "date": fixture.get("date", ""),
+        "date": fixture.get("date", "")
     }
+
+# =========================================================
+# SCORE BASE
+# =========================================================
 
 def base_goal_score(info):
     score = 63.0
     league_id = info["league_id"]
-    texto = f"{info['home_name']} {info['away_name']}".lower()
+    text = f"{info['home_name']} {info['away_name']}".lower()
 
     score *= LEAGUE_GOAL_PROFILE.get(league_id, 1.00)
 
@@ -293,10 +263,11 @@ def base_goal_score(info):
         "ajax", "psv", "feyenoord", "bayern", "leverkusen",
         "atalanta", "sporting", "benfica", "porto",
         "manchester city", "arsenal", "liverpool",
+        "real madrid", "barcelona", "bayern", "dortmund",
         "al hilal", "al nassr", "al ittihad"
     ]
 
-    if any(term in texto for term in attacking_terms):
+    if any(term in text for term in attacking_terms):
         score += 2.5
 
     derby_terms = [
@@ -305,7 +276,7 @@ def base_goal_score(info):
         "sevilla", "betis"
     ]
 
-    if any(term in texto for term in derby_terms):
+    if any(term in text for term in derby_terms):
         score -= 1.5
 
     return clamp(score, 58, 78)
@@ -313,26 +284,19 @@ def base_goal_score(info):
 def base_corner_score(info):
     score = 60.0
     league_id = info["league_id"]
-    texto = f"{info['home_name']} {info['away_name']}".lower()
+    text = f"{info['home_name']} {info['away_name']}".lower()
 
     score *= LEAGUE_CORNER_PROFILE.get(league_id, 1.00)
 
     pressing_terms = [
         "liverpool", "arsenal", "atalanta", "leverkusen",
         "ajax", "psv", "feyenoord", "roma", "porto",
-        "benfica", "al hilal", "al nassr", "al ittihad"
+        "benfica", "real madrid", "barcelona",
+        "al hilal", "al nassr", "al ittihad"
     ]
 
-    if any(term in texto for term in pressing_terms):
+    if any(term in text for term in pressing_terms):
         score += 3.0
-
-    derby_terms = [
-        "milan", "inter", "roma", "betis", "sevilla",
-        "galatasaray", "fenerbahce", "celtic", "rangers"
-    ]
-
-    if any(term in texto for term in derby_terms):
-        score -= 0.5
 
     return clamp(score, 56, 77)
 
@@ -368,7 +332,6 @@ def apply_prediction_to_goal_score(base_score, pred):
 
     predictions = pred.get("predictions", {})
     comparison = pred.get("comparison", {})
-
     goals = predictions.get("goals", {})
     advice = (predictions.get("advice") or "").lower()
 
@@ -395,12 +358,9 @@ def apply_prediction_to_goal_score(base_score, pred):
     elif "under 3.5" in advice:
         score += 1.5
 
-    home_attack = comparison.get("att", {}).get("home")
-    away_attack = comparison.get("att", {}).get("away")
-
-    if home_attack == "strong":
+    if comparison.get("att", {}).get("home") == "strong":
         score += 1.0
-    if away_attack == "strong":
+    if comparison.get("att", {}).get("away") == "strong":
         score += 1.0
 
     return clamp(score, 58, 84)
@@ -415,21 +375,14 @@ def apply_prediction_to_corner_score(base_score, pred):
     predictions = pred.get("predictions", {})
     advice = (predictions.get("advice") or "").lower()
 
-    home_att = comparison.get("att", {}).get("home")
-    away_att = comparison.get("att", {}).get("away")
-    home_h2h = comparison.get("h2h", {}).get("home")
-    away_h2h = comparison.get("h2h", {}).get("away")
-
-    if home_att == "strong":
+    if comparison.get("att", {}).get("home") == "strong":
         score += 1.5
-    if away_att == "strong":
+    if comparison.get("att", {}).get("away") == "strong":
         score += 1.5
-
-    if home_h2h == "strong":
+    if comparison.get("h2h", {}).get("home") == "strong":
         score += 0.5
-    if away_h2h == "strong":
+    if comparison.get("h2h", {}).get("away") == "strong":
         score += 0.5
-
     if "over 2.5" in advice or "over 1.5" in advice:
         score += 1.5
 
@@ -444,8 +397,7 @@ def build_goal_candidates(matches):
 
     for m in matches:
         info = get_match_info(m)
-        base = base_goal_score(info)
-        raw.append({"info": info, "base": base})
+        raw.append({"info": info, "base": base_goal_score(info)})
 
     raw.sort(key=lambda x: x["base"], reverse=True)
 
@@ -454,16 +406,15 @@ def build_goal_candidates(matches):
 
     for item in raw:
         info = item["info"]
-        base = item["base"]
-
         pred = None
+
         if calls < MAX_PREDICTION_CALLS:
             pred = get_prediction(info["fixture_id"])
             calls += 1
 
-        prob = apply_prediction_to_goal_score(base, pred)
-
+        prob = apply_prediction_to_goal_score(item["base"], pred)
         mercado = "Total de Gols: Mais de 1.5"
+
         if prob < 68 and info["league_id"] in {140, 128, 13, 11}:
             mercado = "Total de Gols: Menos de 3.5"
             prob = clamp(prob + 2.0, 58, 84)
@@ -484,8 +435,7 @@ def build_corner_candidates(matches):
 
     for m in matches:
         info = get_match_info(m)
-        base = base_corner_score(info)
-        raw.append({"info": info, "base": base})
+        raw.append({"info": info, "base": base_corner_score(info)})
 
     raw.sort(key=lambda x: x["base"], reverse=True)
 
@@ -494,16 +444,15 @@ def build_corner_candidates(matches):
 
     for item in raw:
         info = item["info"]
-        base = item["base"]
-
         pred = None
+
         if calls < MAX_PREDICTION_CALLS:
             pred = get_prediction(info["fixture_id"])
             calls += 1
 
-        prob = apply_prediction_to_corner_score(base, pred)
-
+        prob = apply_prediction_to_corner_score(item["base"], pred)
         mercado = "Total de Escanteios: Mais de 8.5"
+
         if prob < 68:
             mercado = "Total de Escanteios: Mais de 7.5"
 
@@ -523,17 +472,16 @@ def build_corner_candidates(matches):
 # =========================================================
 
 def top_gols(matches):
-    candidatos = build_goal_candidates(matches)
-    candidatos = [x for x in candidatos if x["prob"] >= MIN_GOAL_PROB]
+    candidatos = [x for x in build_goal_candidates(matches) if x["prob"] >= MIN_GOAL_PROB]
     candidatos.sort(key=lambda x: x["prob"], reverse=True)
 
     ranking = []
-    usados = set()
+    used = set()
 
     for item in candidatos:
-        if item["jogo"] in usados:
+        if item["jogo"] in used:
             continue
-        usados.add(item["jogo"])
+        used.add(item["jogo"])
         ranking.append(item)
         if len(ranking) >= 10:
             break
@@ -541,17 +489,16 @@ def top_gols(matches):
     return ranking
 
 def top_escanteios(matches):
-    candidatos = build_corner_candidates(matches)
-    candidatos = [x for x in candidatos if x["prob"] >= MIN_CORNER_PROB]
+    candidatos = [x for x in build_corner_candidates(matches) if x["prob"] >= MIN_CORNER_PROB]
     candidatos.sort(key=lambda x: x["prob"], reverse=True)
 
     ranking = []
-    usados = set()
+    used = set()
 
     for item in candidatos:
-        if item["jogo"] in usados:
+        if item["jogo"] in used:
             continue
-        usados.add(item["jogo"])
+        used.add(item["jogo"])
         ranking.append(item)
         if len(ranking) >= 10:
             break
@@ -559,68 +506,26 @@ def top_escanteios(matches):
     return ranking
 
 def top_fortes(matches):
-    gols = build_goal_candidates(matches)
-    esc = build_corner_candidates(matches)
-
     candidatos = []
 
-    for item in gols:
+    for item in build_goal_candidates(matches):
         if item["prob"] >= MIN_STRONG_PROB:
             candidatos.append(item)
 
-    for item in esc:
+    for item in build_corner_candidates(matches):
         if item["prob"] >= MIN_STRONG_PROB:
             candidatos.append(item)
 
     candidatos.sort(key=lambda x: x["prob"], reverse=True)
 
     ranking = []
-    usados = set()
+    used = set()
 
     for item in candidatos:
-        chave = (item["jogo"], item["tipo"])
-        if chave in usados:
+        key = (item["jogo"], item["tipo"])
+        if key in used:
             continue
-        usados.add(chave)
-        ranking.append(item)
-        if len(ranking) >= 10:
-            break
-
-    return ranking
-
-def theoretical_value_bets(matches):
-    gols = build_goal_candidates(matches)
-    esc = build_corner_candidates(matches)
-
-    candidatos = []
-
-    for item in gols + esc:
-        if item["prob"] < MIN_VALUE_PROB:
-            continue
-
-        odd_justa = fair_odd_from_prob(item["prob"])
-
-        candidatos.append({
-            "tipo": item["tipo"],
-            "jogo": item["jogo"],
-            "liga": item["liga"],
-            "mercado": item["mercado"],
-            "prob": item["prob"],
-            "faixa": item["faixa"],
-            "odd_justa": odd_justa,
-            "value_faixa": value_band(item["prob"])
-        })
-
-    candidatos.sort(key=lambda x: (x["prob"], -x["odd_justa"]), reverse=True)
-
-    ranking = []
-    usados = set()
-
-    for item in candidatos:
-        chave = (item["jogo"], item["mercado"])
-        if chave in usados:
-            continue
-        usados.add(chave)
+        used.add(key)
         ranking.append(item)
         if len(ranking) >= 10:
             break
@@ -628,67 +533,52 @@ def theoretical_value_bets(matches):
     return ranking
 
 # =========================================================
-# ANALISE POR JOGO
+# ANALISE EXATA
 # =========================================================
 
-def match_side_score(query_side, team_name):
-    q = normalize_text(query_side)
-    t = normalize_text(team_name)
-
-    if not q or not t:
-        return 0
-
-    q_tokens = token_set(q)
-    t_tokens = token_set(t)
-
-    score = 0
-
-    if q == t:
-        score += 12
-
-    if q in t:
-        score += 8
-
-    if t.startswith(q):
-        score += 5
-
-    common = q_tokens.intersection(t_tokens)
-    score += len(common) * 3
-
-    if q.replace(" ", "") == t.replace(" ", ""):
-        score += 6
-
-    return score
-
-def find_match_by_text(matches, query):
+def find_match_exact(pool, query):
     q = normalize_text(query)
+
+    if q.isdigit():
+        fixture_id = int(q)
+        for m in pool:
+            info = get_match_info(m)
+            if info["fixture_id"] == fixture_id:
+                return m
+        return None
 
     if " x " not in q:
         return None
 
     left, right = q.split(" x ", 1)
-    left = left.strip()
-    right = right.strip()
+    left = normalize_text(left)
+    right = normalize_text(right)
 
-    best = None
-    best_score = -1
-
-    for m in matches:
+    # 1) match exato
+    for m in pool:
         info = get_match_info(m)
+        home = normalize_text(info["home_name"])
+        away = normalize_text(info["away_name"])
 
-        home_score = match_side_score(left, info["home_name"])
-        away_score = match_side_score(right, info["away_name"])
+        if home == left and away == right:
+            return m
 
-        total = home_score + away_score
+    # 2) contains dos dois lados, sem adivinhar demais
+    candidates = []
 
-        if total > best_score:
-            best_score = total
-            best = m
+    for m in pool:
+        info = get_match_info(m)
+        home = normalize_text(info["home_name"])
+        away = normalize_text(info["away_name"])
 
-    if best_score < 8:
-        return None
+        if left in home and right in away:
+            score = len(left) + len(right)
+            candidates.append((score, m))
 
-    return best
+    if len(candidates) == 1:
+        return candidates[0][1]
+
+    return None
 
 def analysis_from_prediction(pred, info):
     base_goals = base_goal_score(info)
@@ -711,9 +601,10 @@ def analysis_from_prediction(pred, info):
     recommendations.sort(key=lambda x: x[1], reverse=True)
     best_market, best_prob = recommendations[0]
 
-    msg = f"📊 ANÁLISE DO JOGO\n\n"
+    msg = "📊 ANÁLISE DO JOGO\n\n"
     msg += f"{info['home_name']} x {info['away_name']}\n"
     msg += f"{info['league_name']}\n\n"
+    msg += f"ID do jogo: {info['fixture_id']}\n\n"
 
     msg += f"Over 1.5 gols: {fmt_prob(over15)}% ({confidence(over15)})\n"
     msg += f"Over 2.5 gols: {fmt_prob(over25)}% ({confidence(over25)})\n"
@@ -721,7 +612,8 @@ def analysis_from_prediction(pred, info):
     msg += f"Escanteios +7.5: {fmt_prob(corners75)}% ({confidence(corners75)})\n"
     msg += f"Escanteios +8.5: {fmt_prob(corners85)}% ({confidence(corners85)})\n\n"
 
-    msg += f"Melhor mercado:\n{best_market}\n"
+    msg += "Melhor mercado:\n"
+    msg += f"{best_market}\n"
     msg += f"Probabilidade: {fmt_prob(best_prob)}%\n"
     msg += f"Faixa: {confidence(best_prob)}"
 
@@ -733,29 +625,23 @@ def analyze_match_command(text):
     if not query:
         return (
             "Use assim:\n"
-            "/analise Time da Casa x Time de Fora\n\n"
-            "Exemplo:\n"
-            "/analise Al Nassr x Al Hilal"
+            "/analise Time da Casa x Time de Fora\n"
+            "ou\n"
+            "/analise ID_DO_JOGO\n\n"
+            "Primeiro rode /jogos para ver a lista real."
         )
 
-    analysis_pool = get_analysis_pool()
-    match = find_match_by_text(analysis_pool, query)
+    pool = get_analysis_pool()
+    match = find_match_exact(pool, query)
 
     if not match:
-        exemplos = []
-        for m in analysis_pool[:10]:
-            info = get_match_info(m)
-            exemplos.append(f"{info['home_name']} x {info['away_name']}")
-
-        msg = "Não encontrei esse jogo na janela de busca.\n\n"
-        msg += "Use assim:\n/analise Time da Casa x Time de Fora"
-
-        if exemplos:
-            msg += "\n\nExemplos encontrados:\n"
-            for ex in exemplos[:5]:
-                msg += f"- {ex}\n"
-
-        return msg
+        return (
+            "Não encontrei esse jogo de forma exata.\n\n"
+            "Faça assim:\n"
+            "1. rode /jogos\n"
+            "2. copie o confronto exatamente como apareceu\n"
+            "ou use /analise ID_DO_JOGO"
+        )
 
     info = get_match_info(match)
     pred = get_prediction(info["fixture_id"])
@@ -773,8 +659,8 @@ def format_list(title, ranking):
     msg = f"{title}\n\n"
 
     for i, item in enumerate(ranking, start=1):
-        prefixo = f"[{item['tipo']}] " if title == "💎 TOP FORTES" else ""
-        msg += f"{i}. {prefixo}{item['jogo']}\n"
+        prefix = f"[{item['tipo']}] " if title == "💎 TOP FORTES" else ""
+        msg += f"{i}. {prefix}{item['jogo']}\n"
         msg += f"{item['mercado']}\n"
         msg += f"Probabilidade: {fmt_prob(item['prob'])}%\n"
         msg += f"Faixa: {item['faixa']}\n"
@@ -812,25 +698,22 @@ def format_tophoje(matches):
 
     return msg
 
-def format_valuebets(ranking):
-    if not ranking:
-        return (
-            "💰 VALUEBETS\n\n"
-            "Nenhum value teórico encontrado.\n\n"
-            "Obs: esta versão usa odd justa do modelo, sem odd real da casa."
-        )
+def format_games(pool):
+    if not pool:
+        return "📋 JOGOS\n\nNenhum jogo encontrado na janela de busca."
 
-    msg = "💰 VALUEBETS\n\n"
-    msg += "Obs: odd justa do modelo, sem odd real da casa.\n\n"
+    msg = "📋 JOGOS\n\n"
+    count = 0
 
-    for i, item in enumerate(ranking, start=1):
-        msg += f"{i}. [{item['tipo']}] {item['jogo']}\n"
-        msg += f"{item['mercado']}\n"
-        msg += f"Probabilidade: {fmt_prob(item['prob'])}%\n"
-        msg += f"Odd justa: {fmt_odd(item['odd_justa'])}\n"
-        msg += f"Faixa: {item['value_faixa']}\n"
-        msg += f"{item['liga']}\n\n"
+    for m in pool:
+        info = get_match_info(m)
+        msg += f"{info['fixture_id']} | {info['home_name']} x {info['away_name']}\n"
+        msg += f"{info['league_name']}\n\n"
+        count += 1
+        if count >= 30:
+            break
 
+    msg += "Use:\n/analise ID_DO_JOGO"
     return msg
 
 # =========================================================
@@ -839,7 +722,7 @@ def format_valuebets(ranking):
 
 @app.route("/")
 def home():
-    return "ELITE 13.2 online"
+    return "ELITE 14.0 online"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -855,19 +738,26 @@ def webhook():
     if text in ("/start", "start"):
         send(
             chat_id,
-            "🤖 ELITE 13.2 online ✅\n\n"
+            "🤖 ELITE 14.0 online ✅\n\n"
             "Comandos:\n"
             "/teste\n"
+            "/jogos\n"
             "/topgols\n"
             "/topescanteios\n"
             "/topfortes\n"
             "/tophoje\n"
-            "/valuebets\n"
-            "/analise Time A x Time B"
+            "/analise Time A x Time B\n"
+            "/analise ID_DO_JOGO"
         )
 
     elif text == "/teste":
-        send(chat_id, "✅ ELITE 13.2 funcionando")
+        send(chat_id, "✅ ELITE 14.0 funcionando")
+
+    elif text == "/jogos":
+        try:
+            send(chat_id, format_games(get_analysis_pool()))
+        except Exception as e:
+            send(chat_id, f"Erro no jogos: {type(e).__name__} - {e}")
 
     elif text == "/topgols":
         try:
@@ -897,13 +787,6 @@ def webhook():
         except Exception as e:
             send(chat_id, f"Erro no tophoje: {type(e).__name__} - {e}")
 
-    elif text == "/valuebets":
-        try:
-            matches = get_matches_today()
-            send(chat_id, format_valuebets(theoretical_value_bets(matches)))
-        except Exception as e:
-            send(chat_id, f"Erro no valuebets: {type(e).__name__} - {e}")
-
     elif text.lower().startswith("/analise"):
         try:
             send(chat_id, analyze_match_command(text))
@@ -915,12 +798,13 @@ def webhook():
             chat_id,
             "Comandos:\n"
             "/teste\n"
+            "/jogos\n"
             "/topgols\n"
             "/topescanteios\n"
             "/topfortes\n"
             "/tophoje\n"
-            "/valuebets\n"
-            "/analise Time A x Time B"
+            "/analise Time A x Time B\n"
+            "/analise ID_DO_JOGO"
         )
 
     return {"ok": True}
