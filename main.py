@@ -1,3 +1,4 @@
+
 import os
 import unicodedata
 import requests
@@ -27,7 +28,7 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 # =========================================================
-# CONFIG ELITE 14.0
+# CONFIG ELITE 15.0
 # =========================================================
 
 ALLOWED_LEAGUES = {
@@ -105,9 +106,13 @@ LEAGUE_CORNER_PROFILE = {
 MIN_GOAL_PROB = 65
 MIN_CORNER_PROB = 63
 MIN_STRONG_PROB = 69
+MIN_VALUE_PROB = 66
+MIN_VALUE_EDGE = 0.08   # 8%
 MAX_PREDICTION_CALLS = 20
+MAX_VALUE_FIXTURES = 20
 
 predictions_cache = {}
+odds_cache = {}
 matches_cache = {}
 
 # =========================================================
@@ -140,6 +145,9 @@ def set_webhook():
 def fmt_prob(v):
     return int(round(v))
 
+def fmt_odd(v):
+    return f"{v:.2f}"
+
 def confidence(prob):
     p = fmt_prob(prob)
 
@@ -170,10 +178,7 @@ def normalize_text(text):
     for ch in [".", ",", "-", "/", "(", ")", "'", '"', ":", ";"]:
         text = text.replace(ch, " ")
 
-    remove_words = {
-        "sk", "fk", "fc", "cf", "ac", "sc", "cd", "ud", "bk", "jk"
-    }
-
+    remove_words = {"sk", "fk", "fc", "cf", "ac", "sc", "cd", "ud", "bk", "jk"}
     words = [w for w in text.split() if w not in remove_words]
     text = " ".join(words)
 
@@ -181,6 +186,23 @@ def normalize_text(text):
         text = text.replace("  ", " ")
 
     return text.strip()
+
+def fair_odd_from_prob(prob):
+    p = max(1.0, float(prob))
+    return 100.0 / p
+
+def value_edge(prob, odd):
+    fair = fair_odd_from_prob(prob)
+    return (odd / fair) - 1.0
+
+def edge_label(edge):
+    if edge >= 0.20:
+        return "VALUE ALTO"
+    if edge >= 0.12:
+        return "VALUE BOM"
+    if edge >= 0.08:
+        return "VALUE LEVE"
+    return "SEM VALUE"
 
 # =========================================================
 # BUSCAR JOGOS
@@ -263,7 +285,7 @@ def base_goal_score(info):
         "ajax", "psv", "feyenoord", "bayern", "leverkusen",
         "atalanta", "sporting", "benfica", "porto",
         "manchester city", "arsenal", "liverpool",
-        "real madrid", "barcelona", "bayern", "dortmund",
+        "real madrid", "barcelona", "dortmund",
         "al hilal", "al nassr", "al ittihad"
     ]
 
@@ -425,7 +447,8 @@ def build_goal_candidates(matches):
             "liga": info["league_name"],
             "mercado": mercado,
             "prob": prob,
-            "faixa": confidence(prob)
+            "faixa": confidence(prob),
+            "fixture_id": info["fixture_id"]
         })
 
     return enriched
@@ -462,7 +485,8 @@ def build_corner_candidates(matches):
             "liga": info["league_name"],
             "mercado": mercado,
             "prob": prob,
-            "faixa": confidence(prob)
+            "faixa": confidence(prob),
+            "fixture_id": info["fixture_id"]
         })
 
     return enriched
@@ -533,6 +557,182 @@ def top_fortes(matches):
     return ranking
 
 # =========================================================
+# ODDS / VALUE BETS
+# =========================================================
+
+def get_fixture_odds(fixture_id):
+    if fixture_id in odds_cache:
+        return odds_cache[fixture_id]
+
+    try:
+        data = api_get("/odds", {"fixture": fixture_id})
+        response = data.get("response") or []
+        odds_cache[fixture_id] = response
+        return response
+    except Exception:
+        odds_cache[fixture_id] = []
+        return []
+
+def parse_odd_value(value):
+    try:
+        return float(str(value).replace(",", "."))
+    except Exception:
+        return None
+
+def best_market_odd(odds_response, market_type, target_name):
+    """
+    market_type:
+      - goals
+      - btts
+    target_name:
+      - Over 1.5
+      - Over 2.5
+      - Yes
+    """
+    best_odd = None
+    best_bookmaker = None
+
+    for item in odds_response:
+        bookmakers = item.get("bookmakers", []) or []
+
+        for bookmaker in bookmakers:
+            bookmaker_name = bookmaker.get("name", "Bookmaker")
+            bets = bookmaker.get("bets", []) or []
+
+            for bet in bets:
+                bet_name = (bet.get("name") or "").strip().lower()
+                values = bet.get("values", []) or []
+
+                if market_type == "goals":
+                    if "goals over/under" not in bet_name and "over/under" not in bet_name:
+                        continue
+
+                    for v in values:
+                        label = (v.get("value") or "").strip().lower()
+                        odd = parse_odd_value(v.get("odd"))
+
+                        if odd is None:
+                            continue
+
+                        if label == target_name.lower():
+                            if best_odd is None or odd > best_odd:
+                                best_odd = odd
+                                best_bookmaker = bookmaker_name
+
+                elif market_type == "btts":
+                    if "both teams score" not in bet_name and "btts" not in bet_name:
+                        continue
+
+                    for v in values:
+                        label = (v.get("value") or "").strip().lower()
+                        odd = parse_odd_value(v.get("odd"))
+
+                        if odd is None:
+                            continue
+
+                        if label == target_name.lower():
+                            if best_odd is None or odd > best_odd:
+                                best_odd = odd
+                                best_bookmaker = bookmaker_name
+
+    return best_odd, best_bookmaker
+
+def build_real_valuebets(matches):
+    goal_candidates = build_goal_candidates(matches)
+    goal_candidates.sort(key=lambda x: x["prob"], reverse=True)
+
+    selected = []
+    used_fixture = set()
+
+    for item in goal_candidates:
+        if item["fixture_id"] in used_fixture:
+            continue
+        used_fixture.add(item["fixture_id"])
+        selected.append(item)
+        if len(selected) >= MAX_VALUE_FIXTURES:
+            break
+
+    results = []
+
+    for item in selected:
+        fixture_id = item["fixture_id"]
+        odds_response = get_fixture_odds(fixture_id)
+
+        if not odds_response:
+            continue
+
+        markets = [
+            {
+                "mercado": "Total de Gols: Mais de 1.5",
+                "market_type": "goals",
+                "target": "Over 1.5",
+                "prob": item["prob"]
+            },
+            {
+                "mercado": "Total de Gols: Mais de 2.5",
+                "market_type": "goals",
+                "target": "Over 2.5",
+                "prob": clamp(item["prob"] - 7, 45, 82)
+            },
+            {
+                "mercado": "BTTS: Sim",
+                "market_type": "btts",
+                "target": "Yes",
+                "prob": clamp(item["prob"] - 9, 42, 78)
+            }
+        ]
+
+        for m in markets:
+            prob = m["prob"]
+
+            if prob < MIN_VALUE_PROB:
+                continue
+
+            best_odd, bookmaker = best_market_odd(
+                odds_response,
+                m["market_type"],
+                m["target"]
+            )
+
+            if not best_odd:
+                continue
+
+            fair = fair_odd_from_prob(prob)
+            edge = value_edge(prob, best_odd)
+
+            if edge < MIN_VALUE_EDGE:
+                continue
+
+            results.append({
+                "jogo": item["jogo"],
+                "liga": item["liga"],
+                "fixture_id": fixture_id,
+                "mercado": m["mercado"],
+                "prob": prob,
+                "odd_justa": fair,
+                "odd_casa": best_odd,
+                "bookmaker": bookmaker or "Bookmaker",
+                "edge": edge,
+                "faixa": edge_label(edge)
+            })
+
+    results.sort(key=lambda x: x["edge"], reverse=True)
+
+    unique = []
+    used = set()
+
+    for r in results:
+        key = (r["fixture_id"], r["mercado"])
+        if key in used:
+            continue
+        used.add(key)
+        unique.append(r)
+        if len(unique) >= 10:
+            break
+
+    return unique
+
+# =========================================================
 # ANALISE EXATA
 # =========================================================
 
@@ -554,7 +754,6 @@ def find_match_exact(pool, query):
     left = normalize_text(left)
     right = normalize_text(right)
 
-    # 1) match exato
     for m in pool:
         info = get_match_info(m)
         home = normalize_text(info["home_name"])
@@ -563,7 +762,6 @@ def find_match_exact(pool, query):
         if home == left and away == right:
             return m
 
-    # 2) contains dos dois lados, sem adivinhar demais
     candidates = []
 
     for m in pool:
@@ -716,13 +914,33 @@ def format_games(pool):
     msg += "Use:\n/analise ID_DO_JOGO"
     return msg
 
+def format_valuebets(ranking):
+    if not ranking:
+        return "💰 VALUEBETS\n\nNenhum value real encontrado com odds disponíveis."
+
+    msg = "💰 VALUEBETS\n\n"
+
+    for i, item in enumerate(ranking, start=1):
+        msg += f"{i}. {item['jogo']}\n"
+        msg += f"{item['mercado']}\n"
+        msg += f"ID: {item['fixture_id']}\n"
+        msg += f"Probabilidade modelo: {fmt_prob(item['prob'])}%\n"
+        msg += f"Odd justa: {fmt_odd(item['odd_justa'])}\n"
+        msg += f"Odd encontrada: {fmt_odd(item['odd_casa'])}\n"
+        msg += f"Bookmaker: {item['bookmaker']}\n"
+        msg += f"Edge: {item['edge'] * 100:.1f}%\n"
+        msg += f"Faixa: {item['faixa']}\n"
+        msg += f"{item['liga']}\n\n"
+
+    return msg
+
 # =========================================================
 # FLASK
 # =========================================================
 
 @app.route("/")
 def home():
-    return "ELITE 14.0 online"
+    return "ELITE 15.0 online"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -738,7 +956,7 @@ def webhook():
     if text in ("/start", "start"):
         send(
             chat_id,
-            "🤖 ELITE 14.0 online ✅\n\n"
+            "🤖 ELITE 15.0 online ✅\n\n"
             "Comandos:\n"
             "/teste\n"
             "/jogos\n"
@@ -746,12 +964,13 @@ def webhook():
             "/topescanteios\n"
             "/topfortes\n"
             "/tophoje\n"
+            "/valuebets\n"
             "/analise Time A x Time B\n"
             "/analise ID_DO_JOGO"
         )
 
     elif text == "/teste":
-        send(chat_id, "✅ ELITE 14.0 funcionando")
+        send(chat_id, "✅ ELITE 15.0 funcionando")
 
     elif text == "/jogos":
         try:
@@ -787,6 +1006,13 @@ def webhook():
         except Exception as e:
             send(chat_id, f"Erro no tophoje: {type(e).__name__} - {e}")
 
+    elif text == "/valuebets":
+        try:
+            matches = get_matches_today()
+            send(chat_id, format_valuebets(build_real_valuebets(matches)))
+        except Exception as e:
+            send(chat_id, f"Erro no valuebets: {type(e).__name__} - {e}")
+
     elif text.lower().startswith("/analise"):
         try:
             send(chat_id, analyze_match_command(text))
@@ -803,6 +1029,7 @@ def webhook():
             "/topescanteios\n"
             "/topfortes\n"
             "/tophoje\n"
+            "/valuebets\n"
             "/analise Time A x Time B\n"
             "/analise ID_DO_JOGO"
         )
